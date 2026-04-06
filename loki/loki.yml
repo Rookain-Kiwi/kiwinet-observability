@@ -1,0 +1,48 @@
+# loki.yml : Configuration de Loki (agrégateur de logs)
+# Chargé au démarrage. Tout changement nécessite un restart du conteneur.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTHENTIFICATION
+# ─────────────────────────────────────────────────────────────────────────────
+auth_enabled: false   # Pas d'authentification multi-tenant (usage interne uniquement)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SERVEUR
+# ─────────────────────────────────────────────────────────────────────────────
+server:
+  http_listen_port: 3100   # Port d'écoute de l'API HTTP (utilisé par Promtail et Grafana)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARAMÈTRES COMMUNS
+# ─────────────────────────────────────────────────────────────────────────────
+common:
+  instance_addr: 127.0.0.1             # Adresse de cette instance (mode single-node)
+  path_prefix: /loki                   # Répertoire racine pour tous les fichiers de données
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks   # Stockage des blocs de logs compressés
+      rules_directory: /loki/rules     # Stockage des règles d'alerting
+  replication_factor: 1                # Pas de réplication (instance unique, pas de cluster)
+  ring:
+    kvstore:
+      store: inmemory                  # Coordination en mémoire (suffisant en mode single-node)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCHÉMA DE STOCKAGE
+# ─────────────────────────────────────────────────────────────────────────────
+schema_config:
+  configs:
+    - from: 2020-10-24       # Date d'entrée en vigueur de ce schéma
+      store: tsdb            # Moteur d'index : TSDB (recommandé depuis Loki 2.8)
+      object_store: filesystem
+      schema: v13            # Version du schéma (la plus récente, optimisée)
+      index:
+        prefix: index_       # Préfixe des fichiers d'index
+        period: 24h          # Un fichier d'index par jour
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LIMITES
+# ─────────────────────────────────────────────────────────────────────────────
+limits_config:
+  reject_old_samples: true              # Refuse les logs trop anciens (évite les ingestions parasites)
+  reject_old_samples_max_age: 168h      # Délai max d'acceptation : 7 jours

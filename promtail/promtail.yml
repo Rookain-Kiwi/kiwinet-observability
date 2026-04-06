@@ -1,0 +1,39 @@
+# promtail.yml : Configuration de l'agent de collecte de logs
+# Promtail lit les logs des conteneurs Docker et les envoie à Loki.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SERVEUR
+# ─────────────────────────────────────────────────────────────────────────────
+server:
+  http_listen_port: 9080   # Port HTTP pour les métriques et le health check de Promtail
+  grpc_listen_port: 0      # gRPC désactivé (0 = port aléatoire non exposé)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POSITIONS
+# ─────────────────────────────────────────────────────────────────────────────
+positions:
+  # Fichier de suivi de la position de lecture dans chaque log
+  # Permet de reprendre là où Promtail s'est arrêté après un redémarrage
+  filename: /tmp/positions.yaml
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLIENTS
+# ─────────────────────────────────────────────────────────────────────────────
+clients:
+  - url: http://loki:3100/loki/api/v1/push   # Endpoint Loki sur le réseau Docker interne
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCRAPE CONFIGS
+# ─────────────────────────────────────────────────────────────────────────────
+scrape_configs:
+  - job_name: containers
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock   # Accès au daemon Docker via socket Unix
+        refresh_interval: 5s                # Détection des nouveaux conteneurs toutes les 5s
+    relabel_configs:
+      # Extrait le nom du conteneur et l'expose comme label Loki
+      - source_labels: [__meta_docker_container_name]
+        target_label: container
+      # Extrait le nom du service Docker Compose et l'expose comme label Loki
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service

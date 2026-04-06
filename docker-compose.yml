@@ -1,0 +1,173 @@
+###############################################################################
+# docker-compose.yml : Stack de Monitoring
+# Projet  : kiwinet.me
+# VM      : Debian 13.3 ARM AArch64 (Freebox Delta)
+# Images  : Prometheus, cAdvisor, Node Exporter, Loki, Promtail, Grafana
+# Accès   : https://grafana.kiwinet.me (via Traefik)
+# ── Optimisation cAdvisor (2026-04) ─────────────────────────────────────────
+# Ajout de --housekeeping_interval=30s (était 1s par défaut — source principale
+# de charge CPU : 124 % relevés en prod sur 2 vCPU).
+# Ajout de --disable_metrics pour désactiver les collecteurs non utilisés.
+# Ajout de ressources.limits comme filet de sécurité.
+###############################################################################
+
+services:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PROMETHEUS : Collecte et stockage des métriques
+  # ───────────────────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    volumes:
+      # Définition des cibles à scraper (services, intervalles, labels)
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Stockage persistant des séries temporelles
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=15d"   # Rétention des données : 15 jours
+    networks:
+      - proxy       # Accès Traefik (si dashboard Prometheus exposé)
+      - monitoring  # Scraping des exporters internes
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # CADVISOR : Métriques des containers Docker (CPU, mémoire, réseau, I/O)
+  # ───────────────────────────────────────────────────────────────────────────
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    restart: unless-stopped
+    privileged: true   # Requis pour accéder aux cgroups et namespaces du kernel
+    volumes:
+      - /:/rootfs:ro                        # Système de fichiers racine (lecture seule)
+      - /var/run:/var/run:ro                # Sockets système (dont Docker)
+      - /sys:/sys:ro                        # Informations kernel (cgroups, etc.)
+      - /var/lib/docker/:/var/lib/docker:ro # Métadonnées des containers Docker
+    command:
+      # ⚡ Intervalle de collecte interne : 30s au lieu de 1s par défaut
+      # C'est le réglage le plus impactant — cAdvisor se réveillait 60× par
+      # minute pour inspecter tous les conteneurs, même sans scrape actif.
+      - "--housekeeping_interval=30s"
+      # ⚡ Désactivation des collecteurs non utilisés dans cette stack
+      # Supprime la collecte de métriques kernel avancées inutiles en prod légère
+      - "--disable_metrics=cpu_topology,cpuset,memory_numa,process,referenced_memory,resctrl,sched,tcp,udp"
+      # ⚡ Désactive le stockage des labels Docker dans cAdvisor (verbosité inutile)
+      - "--store_container_labels=false"
+    deploy:
+      resources:
+        limits:
+          # ⚡ Filet de sécurité : cAdvisor ne peut pas monopoliser plus de 40 %
+          # d'un cœur, même en cas de pic de scrape simultané.
+          cpus: "0.40"
+          memory: 256M
+    networks:
+      - monitoring
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # NODE EXPORTER : Métriques système de l'hôte (CPU, mémoire, disque, réseau)
+  # ───────────────────────────────────────────────────────────────────────────
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    restart: unless-stopped
+    pid: host   # Partage le namespace PID de l'hôte (métriques de processus précises)
+    volumes:
+      - /proc:/host/proc:ro   # Informations processus de l'hôte
+      - /sys:/host/sys:ro     # Informations kernel de l'hôte
+      - /:/rootfs:ro          # Système de fichiers racine (pour les métriques disque)
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      # Exclusion des pseudo-systèmes de fichiers (évite les doublons de métriques)
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    networks:
+      - monitoring
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # LOKI : Agrégation et indexation des logs
+  # ───────────────────────────────────────────────────────────────────────────
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    restart: unless-stopped
+    user: "0"   # root requis pour écrire dans le volume persistant
+    volumes:
+      # Configuration Loki (ingestion, stockage, rétention)
+      - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      # Stockage persistant des chunks de logs
+      - loki_data:/loki
+    command: -config.file=/etc/loki/loki.yml
+    networks:
+      - monitoring
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # PROMTAIL : Collecte et expédition des logs vers Loki
+  # ───────────────────────────────────────────────────────────────────────────
+  promtail:
+    image: grafana/promtail:latest
+    container_name: promtail
+    restart: unless-stopped
+    volumes:
+      # Configuration Promtail (sources, labels, pipeline)
+      - ./promtail/promtail.yml:/etc/promtail/promtail.yml:ro
+      # Accès au socket Docker pour découvrir et lire les logs des containers
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Logs système de l'hôte (auth, syslog, kernel…)
+      - /var/log:/var/log:ro
+    command: -config.file=/etc/promtail/promtail.yml
+    networks:
+      - monitoring
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # GRAFANA : Visualisation des métriques et des logs
+  # ───────────────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    volumes:
+      # Stockage persistant (dashboards, datasources, utilisateurs, plugins)
+      - grafana_data:/var/lib/grafana
+    networks:
+      - proxy       # Exposition publique via Traefik
+      - monitoring  # Accès aux datasources Prometheus et Loki
+    labels:
+      - "traefik.enable=true"
+
+      # ── Exposition Grafana ─────────────────────────────────────────────────
+      # Accessible sur https://grafana.kiwinet.me
+      # Sécurisé par les headers définis dans dynamic.yml (kiwinet-infra)
+      - "traefik.http.routers.grafana.rule=Host(`grafana.kiwinet.me`)"
+      - "traefik.http.routers.grafana.entrypoints=websecure"
+      - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
+      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+      - "traefik.http.routers.grafana.middlewares=secure-headers@file"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RÉSEAUX
+# ─────────────────────────────────────────────────────────────────────────────
+networks:
+
+  # Réseau frontal partagé : créé par kiwinet-infra, utilisé pour l'accès Traefik
+  proxy:
+    external: true
+
+  # Réseau interne : communication entre les services de monitoring (non exposé)
+  monitoring:
+    driver: bridge
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VOLUMES
+# ─────────────────────────────────────────────────────────────────────────────
+volumes:
+
+  # Données Prometheus (séries temporelles, index TSDB)
+  prometheus_data:
+
+  # Données Loki (chunks de logs compressés)
+  loki_data:
+
+  # Données Grafana (dashboards, datasources, configuration)
+  grafana_data:
