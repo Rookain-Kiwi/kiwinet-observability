@@ -1,0 +1,8 @@
+# .gitignore
+data/
+
+# Variables d'environnement — ne jamais versionner
+.env
+
+# macOS
+.DS_Store
