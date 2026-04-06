@@ -1,0 +1,50 @@
+###############################################################################
+# docker-compose.yml : Uptime Kuma Status Page
+# Projet  : kiwinet.me
+# VM      : Debian 13.3 ARM AArch64 (Freebox Delta)
+# Image   : louislam/uptime-kuma:1 (compatible linux/arm64)
+# URL     : https://status.kiwinet.me
+###############################################################################
+
+services:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # UPTIME KUMA : Page de statut et monitoring des services
+  # ───────────────────────────────────────────────────────────────────────────
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    container_name: uptime-kuma
+    restart: unless-stopped
+
+    volumes:
+      # Stockage persistant des données (monitors, historique, configuration)
+      - ./data:/app/data
+
+    networks:
+      - proxy
+
+    labels:
+      - "traefik.enable=true"
+
+      # ── Routeur Uptime Kuma ────────────────────────────────────────────────
+      # Accessible sur https://status.kiwinet.me
+      # En-têtes de sécurité appliqués via le secure-headers dans dynamic.yml (kiwinet-infra)
+      - "traefik.http.routers.uptime-kuma.rule=Host(`status.kiwinet.me`)"
+      - "traefik.http.routers.uptime-kuma.entrypoints=websecure"
+      - "traefik.http.routers.uptime-kuma.tls.certresolver=letsencrypt"
+      - "traefik.http.services.uptime-kuma.loadbalancer.server.port=3001"
+      - "traefik.http.routers.uptime-kuma.middlewares=secure-headers@file"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RÉSEAUX
+# ─────────────────────────────────────────────────────────────────────────────
+networks:
+
+  # Réseau frontal partagé : déclaré dans kiwinet-infra, utilisé en externe
+  proxy:
+    external: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VOLUMES
+# ─────────────────────────────────────────────────────────────────────────────
+volumes: {}
