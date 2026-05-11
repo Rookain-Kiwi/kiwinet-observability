@@ -84,18 +84,45 @@ Pas d'`auth-basic` - la page de statut est publique par conception.
 
 ## Monitors configurés
 
-| Monitor            | Type     | Cible                                | Note                    
-|--------------------|----------|--------------------------------------|-------------------------
-| Routeur            | HTTP(s)  | `https://freebox.kiwinet.me`         | Port admin non publié   
-| Site Principal     | HTTP(s)  | `https://kiwinet.me`                 |                         
-| Traefik            | HTTP(s)  | `https://traefik.kiwinet.me`         | HTTP 401 accepté        
-| Plex               | HTTP(s)  | `https://plex.kiwinet.me`            | HTTP 401 accepté        
-| Status             | HTTP(s)  | `https://status.kiwinet.me`          |                         
-| Grafana            | HTTP(s)  | `https://grafana.kiwinet.me`         |                         
-| Home Assistant     | HTTP(s)  | `https://hub.kiwinet.me`             |                         
-| Minecraft          | TCP Port | `minecraft.kiwinet.me:25565`         | TCP brut, hors Traefik  
+| Monitor            | Type     | Cible                                | Note                         |
+|--------------------|----------|--------------------------------------|------------------------------|
+| Routeur            | HTTP(s)  | `https://freebox.kiwinet.me`         | Port admin non publié        |
+| Site Principal     | HTTP(s)  | `https://kiwinet.me`                 |                              |
+| Traefik            | HTTP(s)  | `https://traefik.kiwinet.me`         | HTTP 401 accepté             |
+| Plex               | HTTP(s)  | `https://plex.kiwinet.me`            | HTTP 401 accepté             |
+| Status             | HTTP(s)  | `https://status.kiwinet.me`          |                              |
+| Grafana            | HTTP(s)  | `https://grafana.kiwinet.me`         |                              |
+| Home Assistant     | HTTP(s)  | `https://hub.kiwinet.me`             | GET requis (405 sur HEAD)    |
+| Minecraft          | TCP Port | `minecraft.kiwinet.me:25565`         | TCP brut, hors Traefik       |
+| Komga              | HTTP(s)  | `https://komga.kiwinet.me`           |                              |
+| Calibre-Web        | HTTP(s)  | `https://calibre.kiwinet.me`         |                              |
 
 Les monitors Traefik et Plex retournent un HTTP 401 (authentification requise). Uptime Kuma est configuré pour accepter ce code comme réponse valide - le service est *up*, mais protégé.
+
+---
+
+## Configuration des monitors
+
+| Paramètre      | Valeur recommandée | Raison                                                        |
+|----------------|--------------------|---------------------------------------------------------------|
+| Essais         | 2                  | Tolère un accroc DNS ponctuel avant de déclarer down          |
+| Timeout        | 10s                | Détecte une vraie panne sans générer de faux positif          |
+| Méthode HTTP   | GET                | Home Assistant rejette HEAD avec un 405                       |
+
+---
+
+## Résolution DNS
+
+Le container Uptime Kuma utilise des resolvers DNS publics en fallback via la directive `dns:` du compose :
+
+```yaml
+dns:
+  - 1.1.1.1
+  - 9.9.9.9
+  - 192.168.1.254
+```
+
+Sans cette directive, Docker hérite du resolver de l'hôte (`192.168.1.254`, Freebox uniquement). Une instabilité ponctuelle du resolver Freebox provoque des erreurs `ENOTFOUND` et de fausses alertes sur tous les monitors, même pour des services parfaitement accessibles par IP.
 
 ---
 
@@ -117,9 +144,9 @@ Cela contraste avec `grafana.kiwinet.me` qui révèle la stack - acceptable car 
 
 ## Infrastructure cible
 
-| Composant    | Détail                                         
-|--------------|------------------------------------------------
-| OS           | Debian GNU/Linux 13.3 (Trixie)                 
-| Architecture | ARM AArch64 (Freebox Delta)                    
-| Image Docker | `louislam/uptime-kuma:1`                       
-| Réseau       | `proxy` (bridge externe, partagé avec Traefik) 
+| Composant    | Détail                                         |
+|--------------|------------------------------------------------|
+| OS           | Debian GNU/Linux 13.3 (Trixie)                 |
+| Architecture | ARM AArch64 (Freebox Delta)                    |
+| Image Docker | `louislam/uptime-kuma:1`                       |
+| Réseau       | `proxy` (bridge externe, partagé avec Traefik) |
