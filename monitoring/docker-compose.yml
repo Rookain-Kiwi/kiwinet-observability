@@ -61,7 +61,7 @@ services:
           # ⚡ Filet de sécurité : cAdvisor ne peut pas monopoliser plus de 40 %
           # d'un cœur, même en cas de pic de scrape simultané.
           cpus: "0.40"
-          memory: 256M
+          memory: 384M    # était 256M — relevé pour absorber les pics de scrape
     networks:
       - monitoring
 
