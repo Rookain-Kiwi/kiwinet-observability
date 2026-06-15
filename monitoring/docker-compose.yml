@@ -52,7 +52,7 @@ services:
       - "--housekeeping_interval=30s"
       # ⚡ Désactivation des collecteurs non utilisés dans cette stack
       # Supprime la collecte de métriques kernel avancées inutiles en prod légère
-      - "--disable_metrics=cpu_topology,cpuset,memory_numa,process,referenced_memory,resctrl,sched,tcp,udp"
+      - "--disable_metrics=cpu_topology,cpuset,memory_numa,process,referenced_memory,resctrl,sched,tcp,udp,disk,diskIO"
       # ⚡ Désactive le stockage des labels Docker dans cAdvisor (verbosité inutile)
       - "--store_container_labels=false"
     deploy:
