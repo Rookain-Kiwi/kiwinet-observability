@@ -9,6 +9,11 @@
 # de charge CPU : 124 % relevés en prod sur 2 vCPU).
 # Ajout de --disable_metrics pour désactiver les collecteurs non utilisés.
 # Ajout de ressources.limits comme filet de sécurité.
+# ── Migration Grafana vers PostgreSQL mutualisé (2026-06, ADR-005) ─────────
+# Grafana ne stocke plus sa configuration en SQLite local (volume grafana_data)
+# mais dans la base `grafana` de l'instance PostgreSQL mutualisée (kiwinet-services).
+# Reconfiguration des datasources (Prometheus, Loki) requise après bascule —
+# repartir d'une base vide était le choix le plus sûr, aucune donnée à migrer.
 ###############################################################################
 
 services:
@@ -52,6 +57,9 @@ services:
       - "--housekeeping_interval=30s"
       # ⚡ Désactivation des collecteurs non utilisés dans cette stack
       # Supprime la collecte de métriques kernel avancées inutiles en prod légère
+      # disk/diskIO désactivés (2026-06) — fsHandler scannait les overlayfs
+      # de tous les containers à chaque cycle, jusqu'à 44s pour un seul container
+      # et accumulation mémoire jusqu'à saturation de la limite (355Mi/384Mi)
       - "--disable_metrics=cpu_topology,cpuset,memory_numa,process,referenced_memory,resctrl,sched,tcp,udp,disk,diskIO"
       # ⚡ Désactive le stockage des labels Docker dans cAdvisor (verbosité inutile)
       - "--store_container_labels=false"
@@ -127,12 +135,19 @@ services:
     image: grafana/grafana:latest
     container_name: grafana
     restart: unless-stopped
-    volumes:
-      # Stockage persistant (dashboards, datasources, utilisateurs, plugins)
-      - grafana_data:/var/lib/grafana
+    environment:
+      # Bascule vers PostgreSQL mutualisé (ADR-005) — remplace le SQLite embarqué
+      # Base et utilisateur créés au préalable sur l'instance postgres (kiwinet-services)
+      GF_DATABASE_TYPE: postgres
+      GF_DATABASE_HOST: postgres:5432
+      GF_DATABASE_NAME: grafana
+      GF_DATABASE_USER: grafana
+      GF_DATABASE_PASSWORD: ${GRAFANA_DB_PASSWORD}
+      GF_DATABASE_SSL_MODE: disable
     networks:
       - proxy       # Exposition publique via Traefik
       - monitoring  # Accès aux datasources Prometheus et Loki
+      - db          # Accès à PostgreSQL mutualisé (kiwinet-services)
     labels:
       - "traefik.enable=true"
 
@@ -144,6 +159,8 @@ services:
       - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
       - "traefik.http.services.grafana.loadbalancer.server.port=3000"
       - "traefik.http.routers.grafana.middlewares=secure-headers@file"
+      # Obligatoire : container sur plusieurs réseaux (proxy, monitoring, db)
+      - "traefik.docker.network=proxy"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RÉSEAUX
@@ -158,6 +175,11 @@ networks:
   monitoring:
     driver: bridge
 
+  # Réseau base de données partagé : créé par le rôle Ansible db, utilisé pour
+  # joindre l'instance PostgreSQL mutualisée définie dans kiwinet-services
+  db:
+    external: true
+
 # ─────────────────────────────────────────────────────────────────────────────
 # VOLUMES
 # ─────────────────────────────────────────────────────────────────────────────
@@ -169,5 +191,6 @@ volumes:
   # Données Loki (chunks de logs compressés)
   loki_data:
 
-  # Données Grafana (dashboards, datasources, configuration)
-  grafana_data:
+  # NOTE : grafana_data (volume SQLite) supprimé — Grafana persiste désormais
+  # sa configuration dans PostgreSQL (base grafana). Conservé en commentaire
+  # pour traçabilité de la migration (ADR-005, juin 2026).
