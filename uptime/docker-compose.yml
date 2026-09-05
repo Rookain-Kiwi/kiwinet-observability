@@ -2,7 +2,7 @@
 # docker-compose.yml : Uptime Kuma Status Page
 # Projet  : kiwinet.me
 # VM      : Debian 13.3 ARM AArch64 (Freebox Delta)
-# Image   : louislam/uptime-kuma:1 (compatible linux/arm64)
+# Image   : louislam/uptime-kuma:2 (compatible linux/arm64)
 # URL     : https://status.kiwinet.me
 ###############################################################################
 
@@ -12,7 +12,7 @@ services:
   # UPTIME KUMA : Page de statut et monitoring des services
   # ───────────────────────────────────────────────────────────────────────────
   uptime-kuma:
-    image: louislam/uptime-kuma:1
+    image: louislam/uptime-kuma:2
     container_name: uptime-kuma
     restart: unless-stopped
 
