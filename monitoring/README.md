@@ -72,9 +72,11 @@ cible injoignable (alerte `cible-injoignable`). Aucune règle ne l'ouvre au rés
 au socket Docker. Risque assumé, limité : aucun port publié, réseau `monitoring` seulement.
 Il ne peut donc pas être durci comme les autres (ni `cap_drop`, ni lecture seule).
 
-**Alloy tourne en root dans le conteneur** (comme son image), mais sans aucune capacité, en
+**Alloy tourne sous l'utilisateur de son image (473), jamais en root**, sans aucune capacité, en
 lecture seule, et **sans accès au socket Docker** : il lit les conteneurs par le proxy de
-socket. Le journal systemd est monté en lecture seule. Les lignes de `sudo` sont écartées
+socket. Le journal systemd est monté en lecture seule, lisible grâce au groupe
+`systemd-journal` ajouté au conteneur (GID de l'hôte, 999 par défaut : variable `JOURNAL_GID`
+du `.env` si le numéro diffère, `getent group systemd-journal`). Les lignes de `sudo` sont écartées
 avant l'envoi à Loki (elles contiennent les commandes saisies, arguments compris).
 
 **Proxy de socket.** Il autorise la lecture des conteneurs et des réseaux (`NETWORKS=1`, requis par la découverte d'Alloy). Tout client de ce proxy peut lire
@@ -182,7 +184,6 @@ l'emporte sur la règle des deux semaines.
 
 - Pas de healthcheck : l'outillage disponible dans chaque image n'est pas vérifié. Les services
   reviennent par `restart: unless-stopped` (Grafana attend PostgreSQL en redémarrant).
-- Alloy en root sans capacités : un utilisateur non root demanderait de préparer le volume.
 - Aucune vérification externe : à traiter avec Uptime Kuma.
 - Journalisation de WebDAV : niveau par défaut, sans les requêtes ; à décider avant de la relever
   (chemins et noms d'utilisateur entreraient dans Loki).

@@ -152,12 +152,17 @@ services:
   # - conteneurs : via le proxy de socket en lecture seule (réseau `socket-proxy`),
   #   jamais par un montage de docker.sock
   # - hôte : journal systemd monté en lecture seule
-  # Tourne en root dans le conteneur (comme l'image) mais sans aucune capacité.
+  # Tourne sous l'utilisateur de l'image (473), jamais en root. Le groupe
+  # systemd-journal (GID de l'hôte, 999 ici : `getent group systemd-journal`,
+  # modifiable par JOURNAL_GID dans .env) lui donne la lecture du journal.
   # ───────────────────────────────────────────────────────────────────────────
   alloy:
     image: grafana/alloy:v1.20.1@sha256:2aa2099af76c0098d4af7a4d6e48f86cb66dc1a000222ad927a1c67c6542d13f
     container_name: alloy
     restart: unless-stopped
+    user: "473:473"
+    group_add:
+      - "${JOURNAL_GID:-999}"
     read_only: true
     <<: *hardening
     logging: *default-logging
