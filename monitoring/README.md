@@ -128,7 +128,8 @@ vérification externe relève d'Uptime Kuma.
 
 Tableaux de bord, tels que publiés sur grafana.com :
 Node Exporter Full (1860, révision 45), cAdvisor (19792, révision 6, labels de projet et de
-service Compose conservés pour ses filtres). Les journaux se consultent par Explore, Loki.
+service Compose conservés pour ses filtres), Traefik officiel (17346, révision 9, alimenté par
+le job `traefik`). Les journaux se consultent par Explore, Loki.
 `allowUiUpdates: false` : le dépôt fait foi, exporter en JSON pour modifier.
 
 ---
@@ -169,7 +170,7 @@ Réseau dédié `traefik-metrics`, créé par `kiwinet-services` (`traefik/docke
 contient que Traefik et Prometheus (un Traefik compromis n'atteint ni Loki ni cAdvisor). Le point
 d'entrée `metrics` de Traefik est lié à son adresse fixe sur ce réseau : les autres conteneurs
 exposés ne peuvent pas lire les métriques. Prometheus rejoint ce réseau (compose) et collecte le
-job `traefik` (`prometheus/prometheus.yml`). Ordre de déploiement : Traefik d'abord, car le réseau
+job `traefik` (`prometheus/prometheus.yml`), qu'affiche le tableau Traefik de Grafana. Ordre de déploiement : Traefik d'abord, car le réseau
 doit exister avant le démarrage de Prometheus.
 
 ## Mettre à jour une image
