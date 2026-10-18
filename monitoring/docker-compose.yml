@@ -50,7 +50,7 @@ services:
       - "--storage.tsdb.retention.size=10GB"
     networks:
       - monitoring
-      # - traefik-metrics   # à activer avec le job « traefik » (voir README)
+      - traefik-metrics   # métriques de Traefik (réseau créé par kiwinet-services)
     deploy:
       resources:
         limits:
@@ -267,9 +267,9 @@ networks:
     external: true
 
   # Réseau dédié aux métriques de Traefik : ne contient que Traefik et Prometheus.
-  # À activer avec le job « traefik » (voir README).
-  # traefik-metrics:
-  #   external: true
+  # Créé par kiwinet-services (traefik/docker-compose.yml) : Traefik se déploie avant.
+  traefik-metrics:
+    external: true
 
   # Réseau interne de la supervision. Nom de l'interface fixé pour que ufw puisse
   # n'autoriser que ce pont vers Node Exporter (réseau hôte).

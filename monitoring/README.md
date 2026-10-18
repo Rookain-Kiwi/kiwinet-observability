@@ -30,6 +30,7 @@ Complète Uptime Kuma (dossier `uptime/`), qui répond à « mon service est-il 
 | `proxy`        | exposition par Traefik | Grafana seulement |
 | `db`           | PostgreSQL mutualisé | Grafana seulement |
 | `socket-proxy` | proxy de socket Docker en lecture seule | Alloy seulement (avec Traefik) |
+| `traefik-metrics` | métriques de Traefik (interne, créé par `kiwinet-services`) | Prometheus seulement (avec Traefik) |
 
 Aucun port n'est publié par la pile. Seul Grafana est joignable depuis Internet, par Traefik.
 
@@ -76,7 +77,7 @@ lecture seule, et **sans accès au socket Docker** : il lit les conteneurs par l
 socket. Le journal systemd est monté en lecture seule. Les lignes de `sudo` sont écartées
 avant l'envoi à Loki (elles contiennent les commandes saisies, arguments compris).
 
-**Proxy de socket.** Il autorise la lecture des conteneurs. Tout client de ce proxy peut lire
+**Proxy de socket.** Il autorise la lecture des conteneurs et des réseaux (`NETWORKS=1`, requis par la découverte d'Alloy). Tout client de ce proxy peut lire
 les variables d'environnement des conteneurs par l'inspection : c'est le cas de Traefik et
 d'Alloy. Les secrets de cette pile passent donc par `.env`, jamais par un fichier versionné,
 mais restent visibles par ces deux clients. Limite connue.
@@ -132,7 +133,7 @@ service Compose conservés pour ses filtres). Les journaux se consultent par Exp
 
 ## Prérequis
 
-- Réseaux externes existants : `proxy`, `db`, `socket-proxy`. Traefik et le proxy de socket actifs.
+- Réseaux externes existants : `proxy`, `db`, `socket-proxy`, `traefik-metrics`. Traefik et le proxy de socket actifs, ce dernier avec `NETWORKS=1`.
 - Base `grafana` et rôle `grafana` sur l'instance PostgreSQL (mot de passe dans `.env`).
 - Fichier `.env` créé depuis `env.example` (jamais versionné).
 - Règle `ufw` de Node Exporter (ci-dessus).
@@ -160,13 +161,14 @@ Ne pas utiliser `docker compose config` sans `-q` : il affiche les secrets.
 - Alertes : bouton « Test » du point de contact `discord-admin` dans Grafana.
 - Après un redémarrage de la machine : tous les conteneurs reviennent seuls.
 
-## Activer les métriques de Traefik
+## Métriques de Traefik
 
-Réseau dédié `traefik-metrics`, qui ne contient que Traefik et Prometheus (un Traefik compromis
-n'atteint ni Loki ni cAdvisor). Étapes : créer le réseau ; déclarer le point d'entrée des
-métriques côté Traefik (`kiwinet-services`, commit séparé, avec redémarrage de Traefik) ; puis
-ici, décommenter le réseau dans le compose (service et section `networks`) et le job
-`traefik` de `prometheus/prometheus.yml`.
+Réseau dédié `traefik-metrics`, créé par `kiwinet-services` (`traefik/docker-compose.yml`) : il ne
+contient que Traefik et Prometheus (un Traefik compromis n'atteint ni Loki ni cAdvisor). Le point
+d'entrée `metrics` de Traefik est lié à son adresse fixe sur ce réseau : les autres conteneurs
+exposés ne peuvent pas lire les métriques. Prometheus rejoint ce réseau (compose) et collecte le
+job `traefik` (`prometheus/prometheus.yml`). Ordre de déploiement : Traefik d'abord, car le réseau
+doit exister avant le démarrage de Prometheus.
 
 ## Mettre à jour une image
 

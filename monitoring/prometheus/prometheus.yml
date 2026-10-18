@@ -40,9 +40,8 @@ scrape_configs:
     static_configs:
       - targets: ["grafana:3000"]
 
-  # ── Traefik (à activer avec le réseau dédié `traefik-metrics`, voir README) ──
-  # Décommenter ce job en même temps que le réseau dans docker-compose.yml, une
-  # fois le point d'entrée des métriques déclaré côté Traefik (kiwinet-services).
-  # - job_name: "traefik"
-  #   static_configs:
-  #     - targets: ["traefik:8082"]
+  # Traefik : point d'entrée « metrics », réseau dédié `traefik-metrics` (créé par
+  # kiwinet-services). Le nom `traefik` se résout vers son adresse sur ce réseau.
+  - job_name: "traefik"
+    static_configs:
+      - targets: ["traefik:8082"]
