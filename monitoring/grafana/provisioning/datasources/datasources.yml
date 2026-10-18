@@ -2,16 +2,6 @@
 # Les UID sont fixes : les tableaux de bord et les règles d'alerte s'y réfèrent.
 apiVersion: 1
 
-# Reprise en main : les deux sources saisies à la main avant le provisionnement
-# (noms en minuscules, UID aléatoires) sont supprimées, aucun tableau de bord ni
-# aucune règle d'alerte n'en dépend. Sans cela, elles feraient doublon.
-# Inoffensif aux démarrages suivants ; à retirer après le premier déploiement réussi.
-deleteDatasources:
-  - name: prometheus
-    orgId: 1
-  - name: loki
-    orgId: 1
-
 datasources:
   - name: Prometheus
     uid: prometheus
