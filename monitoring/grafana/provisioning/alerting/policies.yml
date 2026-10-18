@@ -1,0 +1,12 @@
+# Politique de notification : toutes les alertes partent vers Discord.
+# Pour changer de cible un jour, modifier `receiver` (et le point de contact),
+# les règles restent inchangées.
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: discord-admin
+    group_by: ['alertname']
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 12h

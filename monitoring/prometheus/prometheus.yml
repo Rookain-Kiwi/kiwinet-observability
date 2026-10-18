@@ -1,7 +1,8 @@
 ###############################################################################
 # prometheus.yml : Configuration Prometheus
-# Projet  : kiwinet.me
-# VM      : Debian 13.3 ARM AArch64 (Freebox Delta)
+# Projet : kiwinet.me — serveur x86 (Debian 13)
+# Cibles : toutes sur le réseau Docker interne `monitoring`, sauf Node Exporter
+#          (réseau hôte, joint par l'adresse de la passerelle Docker).
 ###############################################################################
 
 global:
@@ -10,15 +11,38 @@ global:
 
 scrape_configs:
 
+  # Prometheus lui-même
   - job_name: "prometheus"
     static_configs:
       - targets: ["localhost:9090"]
 
+  # Node Exporter : métriques de l'hôte. Il tourne en réseau hôte (voir README) :
+  # `host.docker.internal` est défini dans le compose (extra_hosts: host-gateway).
   - job_name: "node-exporter"
     static_configs:
-      - targets: ["node-exporter:9100"]
+      - targets: ["host.docker.internal:9100"]
 
+  # cAdvisor : métriques par conteneur
   - job_name: "cadvisor"
-    scrape_interval: 60s
     static_configs:
       - targets: ["cadvisor:8080"]
+
+  # Loki, Alloy et Grafana exposent leurs propres métriques
+  - job_name: "loki"
+    static_configs:
+      - targets: ["loki:3100"]
+
+  - job_name: "alloy"
+    static_configs:
+      - targets: ["alloy:12345"]
+
+  - job_name: "grafana"
+    static_configs:
+      - targets: ["grafana:3000"]
+
+  # ── Traefik (à activer avec le réseau dédié `traefik-metrics`, voir README) ──
+  # Décommenter ce job en même temps que le réseau dans docker-compose.yml, une
+  # fois le point d'entrée des métriques déclaré côté Traefik (kiwinet-services).
+  # - job_name: "traefik"
+  #   static_configs:
+  #     - targets: ["traefik:8082"]

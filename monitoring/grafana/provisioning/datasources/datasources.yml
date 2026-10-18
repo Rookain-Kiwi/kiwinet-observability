@@ -1,0 +1,21 @@
+# Sources de données de Grafana, versionnées (plus de saisie à la main).
+# Les UID sont fixes : les tableaux de bord et les règles d'alerte s'y réfèrent.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 60s   # même valeur que scrape_interval
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false

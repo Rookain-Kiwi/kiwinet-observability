@@ -1,0 +1,505 @@
+# Règles d'alerte de Grafana, versionnées (dossier « Kiwinet », groupe « infra »).
+# Chaque règle : A = requête Prometheus, B = dernière valeur, C = seuil.
+# Seuils de départ à ajuster à l'usage. Cible des notifications : policies.yml.
+# Le texte des annotations n'est pas soumis à l'interpolation des variables
+# d'environnement (documentation Grafana), donc `$labels` et `$values` s'écrivent tels quels.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: infra
+    folder: Kiwinet
+    interval: 1m
+    rules:
+      # Disques à surveiller de près : SSD système (volumes de Docker, dont Prometheus et Loki) et Data.
+      - uid: disque-ssd-data
+        title: 'Disque presque plein (SSD système, Data)'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              editorMode: code
+              expr: '100 * (1 - node_filesystem_avail_bytes{mountpoint=~"^(/host)?(/|/mnt/Data)$",fstype!~"tmpfs|overlay|squashfs|ramfs"} / node_filesystem_size_bytes{mountpoint=~"^(/host)?(/|/mnt/Data)$",fstype!~"tmpfs|overlay|squashfs|ramfs"})'
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: []
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              reducer: last
+              refId: B
+              settings:
+                mode: dropNN
+              type: reduce
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 85
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: OK
+        for: 15m
+        annotations:
+          summary: 'Disque presque plein : {{ $labels.mountpoint }}'
+          description: 'Utilisation à {{ printf "%.0f" $values.B.Value }} % sur {{ $labels.mountpoint }} (seuil : 85 %).'
+        labels:
+          severity: warning
+        isPaused: false
+      # Libraries (3 To) est presque plein par nature : seuil plus haut. À ajuster après relevé de l'occupation réelle.
+      - uid: disque-libraries
+        title: 'Disque Libraries presque saturé'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              editorMode: code
+              expr: '100 * (1 - node_filesystem_avail_bytes{mountpoint=~"^(/host)?/mnt/Libraries$"} / node_filesystem_size_bytes{mountpoint=~"^(/host)?/mnt/Libraries$"})'
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: []
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              reducer: last
+              refId: B
+              settings:
+                mode: dropNN
+              type: reduce
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 97
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: OK
+        for: 30m
+        annotations:
+          summary: 'Disque Libraries presque saturé'
+          description: 'Utilisation à {{ printf "%.1f" $values.B.Value }} % sur {{ $labels.mountpoint }} (seuil : 97 %).'
+        labels:
+          severity: warning
+        isPaused: false
+      # Mémoire réellement disponible (hors cache) sous 10 % du total.
+      - uid: memoire-faible
+        title: 'Mémoire disponible faible'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              editorMode: code
+              expr: '100 * node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes'
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: []
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              reducer: last
+              refId: B
+              settings:
+                mode: dropNN
+              type: reduce
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 10
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: OK
+        for: 10m
+        annotations:
+          summary: 'Mémoire disponible faible'
+          description: 'Il ne reste que {{ printf "%.0f" $values.B.Value }} % de mémoire disponible (seuil : 10 %).'
+        labels:
+          severity: warning
+        isPaused: false
+      # Swap utilisé à plus de 85 % : la machine manque de mémoire.
+      - uid: swap-sature
+        title: 'Swap presque saturé'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              editorMode: code
+              expr: '100 * (1 - node_memory_SwapFree_bytes / node_memory_SwapTotal_bytes)'
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: []
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              reducer: last
+              refId: B
+              settings:
+                mode: dropNN
+              type: reduce
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 85
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: OK
+        for: 15m
+        annotations:
+          summary: 'Swap presque saturé'
+          description: 'Swap utilisé à {{ printf "%.0f" $values.B.Value }} % (seuil : 85 %).'
+        labels:
+          severity: warning
+        isPaused: false
+      # Seule règle qui alerte aussi sans donnée ou en cas d'erreur : si Prometheus ou une cible disparaît, c'est elle qui prévient.
+      - uid: cible-injoignable
+        title: 'Cible de supervision injoignable'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              editorMode: code
+              expr: 'up'
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: []
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              reducer: last
+              refId: B
+              settings:
+                mode: dropNN
+              type: reduce
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 1
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: 'Cible injoignable : {{ $labels.job }}'
+          description: 'Prometheus ne joint plus {{ $labels.job }} ({{ $labels.instance }}) depuis plus de 5 minutes.'
+        labels:
+          severity: critical
+        isPaused: false
+      # Plus de 2 démarrages en 15 minutes (d'après cAdvisor).
+      - uid: conteneur-redemarre
+        title: 'Conteneur qui redémarre en boucle'
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              editorMode: code
+              expr: 'changes(container_start_time_seconds{name!=""}[15m])'
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: []
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              reducer: last
+              refId: B
+              settings:
+                mode: dropNN
+              type: reduce
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 2
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        noDataState: OK
+        execErrState: OK
+        for: 0s
+        annotations:
+          summary: 'Conteneur qui redémarre en boucle : {{ $labels.name }}'
+          description: '{{ $labels.name }} a démarré {{ printf "%.0f" $values.B.Value }} fois en 15 minutes.'
+        labels:
+          severity: warning
+        isPaused: false

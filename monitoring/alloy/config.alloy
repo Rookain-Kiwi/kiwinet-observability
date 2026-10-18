@@ -1,0 +1,99 @@
+// config.alloy : collecte des journaux (remplace Promtail, fin de vie)
+//
+// Deux sources, une destination (Loki) :
+//   1. journaux des conteneurs Docker, lus par le proxy de socket en lecture seule
+//   2. journal systemd de l'hôte (SSH, noyau, montages, démon Docker), lecture seule
+// L'adresse du proxy de socket vient de la variable ALLOY_DOCKER_HOST (compose).
+
+logging {
+	level  = "warn"
+	format = "logfmt"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. Conteneurs Docker
+// ─────────────────────────────────────────────────────────────────────────────
+discovery.docker "containers" {
+	host             = sys.env("ALLOY_DOCKER_HOST")
+	refresh_interval = "30s"
+}
+
+discovery.relabel "containers" {
+	targets = discovery.docker.containers.targets
+
+	// Nom du conteneur, sans la barre oblique initiale
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "/?(.*)"
+		target_label  = "container"
+	}
+
+	// Service et projet Docker Compose
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "service"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+		target_label  = "project"
+	}
+}
+
+loki.source.docker "containers" {
+	host             = sys.env("ALLOY_DOCKER_HOST")
+	targets          = discovery.relabel.containers.output
+	labels           = {job = "docker"}
+	refresh_interval = "30s"
+	forward_to       = [loki.write.local.receiver]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. Journal systemd de l'hôte
+// ─────────────────────────────────────────────────────────────────────────────
+loki.relabel "journal" {
+	forward_to = []
+
+	rule {
+		source_labels = ["__journal__systemd_unit"]
+		target_label  = "unit"
+	}
+
+	rule {
+		source_labels = ["__journal_syslog_identifier"]
+		target_label  = "syslog_identifier"
+	}
+
+	rule {
+		source_labels = ["__journal_priority_keyword"]
+		target_label  = "level"
+	}
+}
+
+loki.source.journal "host" {
+	path          = "/var/log/journal"
+	max_age       = "12h"
+	labels        = {job = "journal"}
+	relabel_rules = loki.relabel.journal.rules
+	forward_to    = [loki.process.journal.receiver]
+}
+
+loki.process "journal" {
+	// Les lignes de sudo contiennent les commandes saisies, arguments compris :
+	// elles peuvent embarquer des secrets. On ne les envoie pas à Loki.
+	stage.match {
+		selector = "{syslog_identifier=\"sudo\"}"
+		action   = "drop"
+	}
+
+	forward_to = [loki.write.local.receiver]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Destination
+// ─────────────────────────────────────────────────────────────────────────────
+loki.write "local" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}

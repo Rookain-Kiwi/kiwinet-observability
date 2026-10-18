@@ -1,48 +1,44 @@
-# loki.yml : Configuration de Loki (agrégateur de logs)
-# Chargé au démarrage. Tout changement nécessite un restart du conteneur.
+# loki.yml : Configuration de Loki (agrégateur de journaux)
+# Chargé au démarrage. Tout changement nécessite un redémarrage du conteneur.
 
-# ─────────────────────────────────────────────────────────────────────────────
-# AUTHENTIFICATION
-# ─────────────────────────────────────────────────────────────────────────────
-auth_enabled: false   # Pas d'authentification multi-tenant (usage interne uniquement)
+auth_enabled: false   # Pas de multi-tenant : usage interne, réseau `monitoring` uniquement
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SERVEUR
-# ─────────────────────────────────────────────────────────────────────────────
 server:
-  http_listen_port: 3100   # Port d'écoute de l'API HTTP (utilisé par Promtail et Grafana)
+  http_listen_port: 3100   # API HTTP : utilisée par Alloy (écriture) et Grafana (lecture)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PARAMÈTRES COMMUNS
-# ─────────────────────────────────────────────────────────────────────────────
 common:
-  instance_addr: 127.0.0.1             # Adresse de cette instance (mode single-node)
-  path_prefix: /loki                   # Répertoire racine pour tous les fichiers de données
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
   storage:
     filesystem:
-      chunks_directory: /loki/chunks   # Stockage des blocs de logs compressés
-      rules_directory: /loki/rules     # Stockage des règles d'alerting
-  replication_factor: 1                # Pas de réplication (instance unique, pas de cluster)
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
   ring:
     kvstore:
-      store: inmemory                  # Coordination en mémoire (suffisant en mode single-node)
+      store: inmemory
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SCHÉMA DE STOCKAGE
-# ─────────────────────────────────────────────────────────────────────────────
 schema_config:
   configs:
-    - from: 2020-10-24       # Date d'entrée en vigueur de ce schéma
-      store: tsdb            # Moteur d'index : TSDB (recommandé depuis Loki 2.8)
+    - from: 2020-10-24
+      store: tsdb
       object_store: filesystem
-      schema: v13            # Version du schéma (la plus récente, optimisée)
+      schema: v13
       index:
-        prefix: index_       # Préfixe des fichiers d'index
-        period: 24h          # Un fichier d'index par jour
+        prefix: index_
+        period: 24h
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LIMITES
-# ─────────────────────────────────────────────────────────────────────────────
 limits_config:
-  reject_old_samples: true              # Refuse les logs trop anciens (évite les ingestions parasites)
-  reject_old_samples_max_age: 168h      # Délai max d'acceptation : 7 jours
+  # Rétention des journaux : 15 jours. Appliquée par le compacteur (bloc ci-dessous) ;
+  # sans lui, les journaux sont conservés indéfiniment.
+  retention_period: 360h
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h   # refuse les entrées de plus de 7 jours (ingestion tardive)
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+analytics:
+  reporting_enabled: false   # pas de télémétrie vers Grafana Labs

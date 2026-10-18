@@ -1,165 +1,252 @@
 ###############################################################################
-# docker-compose.yml : Stack de Monitoring
-# Projet  : kiwinet.me
-# VM      : Debian 13.3 ARM AArch64 (Freebox Delta)
-# Images  : Prometheus, cAdvisor, Node Exporter, Loki, Promtail, Grafana
-# Accès   : https://grafana.kiwinet.me (via Traefik)
-# ── Optimisation cAdvisor (2026-04) ─────────────────────────────────────────
-# Ajout de --housekeeping_interval=30s (était 1s par défaut — source principale
-# de charge CPU : 124 % relevés en prod sur 2 vCPU).
-# Ajout de --disable_metrics pour désactiver les collecteurs non utilisés.
-# Ajout de ressources.limits comme filet de sécurité.
-# ── Migration Grafana vers PostgreSQL mutualisé (2026-06, ADR-005) ─────────
-# Grafana ne stocke plus sa configuration en SQLite local (volume grafana_data)
-# mais dans la base `grafana` de l'instance PostgreSQL mutualisée (kiwinet-services).
-# Reconfiguration des datasources (Prometheus, Loki) requise après bascule —
-# repartir d'une base vide était le choix le plus sûr, aucune donnée à migrer.
+# docker-compose.yml : Stack de supervision interne
+# Projet  : kiwinet.me — serveur x86 (Debian 13)
+# Contenu : Prometheus, cAdvisor, Node Exporter (métriques) ; Loki et Grafana
+#           Alloy (journaux) ; Grafana (tableaux de bord et alertes)
+# Accès   : https://grafana.kiwinet.me (via Traefik : limitation de débit,
+#           authentification de base, puis connexion Grafana)
+# Secrets : fichier .env local, ignoré par Git (voir env.example)
+# Détail des choix : README.md et Décisions (Stack) dans le second brain Notion
 ###############################################################################
+
+# Rotation des journaux Docker : le pilote par défaut n'en fait aucune
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# Durcissement commun : élévation de privilèges interdite, aucune capacité
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
 
 services:
 
   # ───────────────────────────────────────────────────────────────────────────
-  # PROMETHEUS : Collecte et stockage des métriques
+  # PROMETHEUS : collecte et stockage des métriques
+  # Rétention : 30 jours ou 10 Go, selon la première limite atteinte
   # ───────────────────────────────────────────────────────────────────────────
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
     container_name: prometheus
     restart: unless-stopped
+    user: "65534:65534"
+    read_only: true
+    <<: *hardening
+    logging: *default-logging
+    # Atteindre Node Exporter, qui tourne en réseau hôte (voir plus bas)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      # Définition des cibles à scraper (services, intervalles, labels)
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      # Stockage persistant des séries temporelles
       - prometheus_data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.retention.time=15d"   # Rétention des données : 15 jours
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--storage.tsdb.retention.size=10GB"
     networks:
-      - proxy       # Accès Traefik (si dashboard Prometheus exposé)
-      - monitoring  # Scraping des exporters internes
-
-  # ───────────────────────────────────────────────────────────────────────────
-  # CADVISOR : Métriques des containers Docker (CPU, mémoire, réseau, I/O)
-  # ───────────────────────────────────────────────────────────────────────────
-  cadvisor:
-    image: gcr.io/cadvisor/cadvisor:latest
-    container_name: cadvisor
-    restart: unless-stopped
-    privileged: true   # Requis pour accéder aux cgroups et namespaces du kernel
-    volumes:
-      - /:/rootfs:ro                        # Système de fichiers racine (lecture seule)
-      - /var/run:/var/run:ro                # Sockets système (dont Docker)
-      - /sys:/sys:ro                        # Informations kernel (cgroups, etc.)
-      - /var/lib/docker/:/var/lib/docker:ro # Métadonnées des containers Docker
-    command:
-      # ⚡ Intervalle de collecte interne : 30s au lieu de 1s par défaut
-      # C'est le réglage le plus impactant — cAdvisor se réveillait 60× par
-      # minute pour inspecter tous les conteneurs, même sans scrape actif.
-      - "--housekeeping_interval=30s"
-      # ⚡ Désactivation des collecteurs non utilisés dans cette stack
-      # Supprime la collecte de métriques kernel avancées inutiles en prod légère
-      # disk/diskIO désactivés (2026-06) — fsHandler scannait les overlayfs
-      # de tous les containers à chaque cycle, jusqu'à 44s pour un seul container
-      # et accumulation mémoire jusqu'à saturation de la limite (355Mi/384Mi)
-      - "--disable_metrics=cpu_topology,cpuset,memory_numa,process,referenced_memory,resctrl,sched,tcp,udp,disk,diskIO"
-      # ⚡ Désactive le stockage des labels Docker dans cAdvisor (verbosité inutile)
-      - "--store_container_labels=false"
+      - monitoring
+      # - traefik-metrics   # à activer avec le job « traefik » (voir README)
     deploy:
       resources:
         limits:
-          # ⚡ Filet de sécurité : cAdvisor ne peut pas monopoliser plus de 40 %
-          # d'un cœur, même en cas de pic de scrape simultané.
-          cpus: "0.40"
-          memory: 384M    # était 256M — relevé pour absorber les pics de scrape
+          memory: 512M
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # CADVISOR : métriques par conteneur (CPU, mémoire, réseau)
+  # Conteneur très privilégié par nature : l'image officielle exige `privileged`
+  # et l'accès au socket Docker. Risque assumé, limité par le réseau (aucun port
+  # publié, réseau `monitoring` seulement). Voir README.
+  # ───────────────────────────────────────────────────────────────────────────
+  cadvisor:
+    image: ghcr.io/google/cadvisor:v0.60.6@sha256:b8e7d1093144fd088f425ff003d75a4aa405de075db78dae3bc563730b1bd07a
+    container_name: cadvisor
+    restart: unless-stopped
+    privileged: true
+    logging: *default-logging
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    command:
+      # Intervalle de collecte : 30 s (1 s par défaut, source principale de charge CPU)
+      - "--housekeeping_interval=30s"
+      # Collecteurs inutiles désactivés (disk/diskIO : le parcours des overlayfs
+      # saturait la mémoire, constaté en 2026-06)
+      - "--disable_metrics=cpu_topology,cpuset,memory_numa,process,referenced_memory,resctrl,sched,tcp,udp,disk,diskIO"
+      # Pas de labels Docker dans les métriques (verbosité inutile), sauf le projet
+      # et le service Compose : le tableau de bord cAdvisor filtre dessus.
+      - "--store_container_labels=false"
+      - "--whitelisted_container_labels=com.docker.compose.project,com.docker.compose.service"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 384M
     networks:
       - monitoring
 
   # ───────────────────────────────────────────────────────────────────────────
-  # NODE EXPORTER : Métriques système de l'hôte (CPU, mémoire, disque, réseau)
+  # NODE EXPORTER : métriques de l'hôte (CPU, mémoire, disques, réseau)
+  # Réseau hôte et PID hôte, comme le demande la documentation officielle, sans
+  # quoi il mesure le conteneur et non la machine. Conséquence : il écoute sur la
+  # machine, hors de Docker, donc hors des règles DOCKER-USER. Seul ufw le filtre :
+  # une règle n'autorise que le pont `br-monitoring` (voir README).
   # ───────────────────────────────────────────────────────────────────────────
   node-exporter:
-    image: prom/node-exporter:latest
+    image: prom/node-exporter:v1.12.1@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0
     container_name: node-exporter
     restart: unless-stopped
-    pid: host   # Partage le namespace PID de l'hôte (métriques de processus précises)
+    network_mode: host
+    pid: host
+    user: "65534:65534"
+    read_only: true
+    <<: *hardening
+    logging: *default-logging
     volumes:
-      - /proc:/host/proc:ro   # Informations processus de l'hôte
-      - /sys:/host/sys:ro     # Informations kernel de l'hôte
-      - /:/rootfs:ro          # Système de fichiers racine (pour les métriques disque)
+      - /:/host:ro,rslave
     command:
-      - "--path.procfs=/host/proc"
-      - "--path.sysfs=/host/sys"
-      # Exclusion des pseudo-systèmes de fichiers (évite les doublons de métriques)
-      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
-    networks:
-      - monitoring
+      - "--path.rootfs=/host"
+      - "--web.listen-address=${NODE_EXPORTER_LISTEN:-0.0.0.0:9100}"
+    deploy:
+      resources:
+        limits:
+          memory: 128M
 
   # ───────────────────────────────────────────────────────────────────────────
-  # LOKI : Agrégation et indexation des logs
+  # LOKI : stockage et interrogation des journaux
+  # Rétention : 15 jours (compacteur, voir loki/loki.yml)
   # ───────────────────────────────────────────────────────────────────────────
   loki:
-    image: grafana/loki:latest
+    image: grafana/loki:3.7.8@sha256:1107dd5274e0ada47e42472b7a7e71f3b2a2fe878878108f3e2f9e51528f0193
     container_name: loki
     restart: unless-stopped
-    user: "0"   # root requis pour écrire dans le volume persistant
+    user: "10001:10001"
+    read_only: true
+    <<: *hardening
+    logging: *default-logging
+    tmpfs:
+      - /tmp
     volumes:
-      # Configuration Loki (ingestion, stockage, rétention)
       - ./loki/loki.yml:/etc/loki/loki.yml:ro
-      # Stockage persistant des chunks de logs
       - loki_data:/loki
-    command: -config.file=/etc/loki/loki.yml
+    command:
+      - "-config.file=/etc/loki/loki.yml"
     networks:
       - monitoring
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
   # ───────────────────────────────────────────────────────────────────────────
-  # PROMTAIL : Collecte et expédition des logs vers Loki
+  # ALLOY : collecte des journaux (remplace Promtail, fin de vie)
+  # - conteneurs : via le proxy de socket en lecture seule (réseau `socket-proxy`),
+  #   jamais par un montage de docker.sock
+  # - hôte : journal systemd monté en lecture seule
+  # Tourne en root dans le conteneur (comme l'image) mais sans aucune capacité.
   # ───────────────────────────────────────────────────────────────────────────
-  promtail:
-    image: grafana/promtail:latest
-    container_name: promtail
+  alloy:
+    image: grafana/alloy:v1.20.1@sha256:2aa2099af76c0098d4af7a4d6e48f86cb66dc1a000222ad927a1c67c6542d13f
+    container_name: alloy
     restart: unless-stopped
+    read_only: true
+    <<: *hardening
+    logging: *default-logging
+    tmpfs:
+      - /tmp
+    environment:
+      ALLOY_DOCKER_HOST: "tcp://socket-proxy:2375"
     volumes:
-      # Configuration Promtail (sources, labels, pipeline)
-      - ./promtail/promtail.yml:/etc/promtail/promtail.yml:ro
-      # Accès au socket Docker pour découvrir et lire les logs des containers
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Logs système de l'hôte (auth, syslog, kernel…)
-      - /var/log:/var/log:ro
-    command: -config.file=/etc/promtail/promtail.yml
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy_data:/var/lib/alloy/data
+      - /var/log/journal:/var/log/journal:ro
+      - /etc/machine-id:/etc/machine-id:ro
+    command:
+      - "run"
+      - "--server.http.listen-addr=0.0.0.0:12345"
+      - "--storage.path=/var/lib/alloy/data"
+      - "--disable-reporting"
+      - "/etc/alloy/config.alloy"
     networks:
       - monitoring
+      - socket-proxy
+    deploy:
+      resources:
+        limits:
+          memory: 256M
 
   # ───────────────────────────────────────────────────────────────────────────
-  # GRAFANA : Visualisation des métriques et des logs
+  # GRAFANA : tableaux de bord, exploration des journaux, alertes vers Discord
+  # - base interne dans PostgreSQL (réseau `db`)
+  # - sources de données, tableaux de bord et alertes provisionnés par fichiers
   # ───────────────────────────────────────────────────────────────────────────
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
     container_name: grafana
     restart: unless-stopped
+    user: "472:0"
+    read_only: true
+    <<: *hardening
+    logging: *default-logging
+    tmpfs:
+      - /tmp
     environment:
-      # Bascule vers PostgreSQL mutualisé (ADR-005) — remplace le SQLite embarqué
-      # Base et utilisateur créés au préalable sur l'instance postgres (kiwinet-services)
+      # Base PostgreSQL mutualisée (ADR-005)
       GF_DATABASE_TYPE: postgres
       GF_DATABASE_HOST: postgres:5432
       GF_DATABASE_NAME: grafana
       GF_DATABASE_USER: grafana
-      GF_DATABASE_PASSWORD: ${GRAFANA_DB_PASSWORD}
+      GF_DATABASE_PASSWORD: ${GRAFANA_DB_PASSWORD:?GRAFANA_DB_PASSWORD manquant, voir env.example}
       GF_DATABASE_SSL_MODE: disable
+      # Adresse publique (liens des alertes) et cookies réservés à HTTPS
+      GF_SERVER_ROOT_URL: https://grafana.kiwinet.me
+      GF_SECURITY_COOKIE_SECURE: "true"
+      # Pas d'inscription, pas d'accès anonyme
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      # Pas de télémétrie ni de recherche de mises à jour vers Grafana Labs
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      # Pas d'installation automatique de plugins depuis grafana.com au démarrage
+      # (activée par défaut depuis Grafana 12) : aucun plugin supplémentaire utilisé
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      # Journaux sur la sortie standard seulement (système de fichiers en lecture seule)
+      GF_LOG_MODE: console
+      # Webhook Discord des alertes : lu par le provisionnement (secret, hors Git)
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:?DISCORD_WEBHOOK_URL manquant, voir env.example}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
     networks:
-      - proxy       # Exposition publique via Traefik
-      - monitoring  # Accès aux datasources Prometheus et Loki
-      - db          # Accès à PostgreSQL mutualisé (kiwinet-services)
+      - proxy       # exposition publique via Traefik
+      - monitoring  # sources de données Prometheus et Loki
+      - db          # PostgreSQL mutualisé (kiwinet-services)
+    deploy:
+      resources:
+        limits:
+          memory: 384M
     labels:
       - "traefik.enable=true"
-
-      # ── Exposition Grafana ─────────────────────────────────────────────────
-      # Accessible sur https://grafana.kiwinet.me
-      # Sécurisé par les headers définis dans dynamic.yml (kiwinet-infra)
+      # https://grafana.kiwinet.me : limitation de débit, puis authentification de
+      # base, puis en-têtes de sécurité (middlewares définis dans dynamic.yml).
+      # Décision : protection renforcée tant que WireGuard n'est pas opérationnel.
       - "traefik.http.routers.grafana.rule=Host(`grafana.kiwinet.me`)"
       - "traefik.http.routers.grafana.entrypoints=websecure"
       - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
       - "traefik.http.services.grafana.loadbalancer.server.port=3000"
-      - "traefik.http.routers.grafana.middlewares=secure-headers@file"
-      # Obligatoire : container sur plusieurs réseaux (proxy, monitoring, db)
+      - "traefik.http.routers.grafana.middlewares=rate-limit@file,auth-basic@file,secure-headers@file"
+      # Obligatoire : conteneur sur plusieurs réseaux (proxy, monitoring, db)
       - "traefik.docker.network=proxy"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -167,30 +254,35 @@ services:
 # ─────────────────────────────────────────────────────────────────────────────
 networks:
 
-  # Réseau frontal partagé : créé par kiwinet-infra, utilisé pour l'accès Traefik
+  # Réseau frontal partagé avec Traefik (créé hors de ce dépôt)
   proxy:
     external: true
 
-  # Réseau interne : communication entre les services de monitoring (non exposé)
-  monitoring:
-    driver: bridge
-
-  # Réseau base de données partagé : créé par le rôle Ansible db, utilisé pour
-  # joindre l'instance PostgreSQL mutualisée définie dans kiwinet-services
+  # Réseau des bases de données (créé hors de ce dépôt)
   db:
     external: true
 
+  # Réseau du proxy de socket Docker en lecture seule (kiwinet-services)
+  socket-proxy:
+    external: true
+
+  # Réseau dédié aux métriques de Traefik : ne contient que Traefik et Prometheus.
+  # À activer avec le job « traefik » (voir README).
+  # traefik-metrics:
+  #   external: true
+
+  # Réseau interne de la supervision. Nom de l'interface fixé pour que ufw puisse
+  # n'autoriser que ce pont vers Node Exporter (réseau hôte).
+  monitoring:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-monitoring
+
 # ─────────────────────────────────────────────────────────────────────────────
-# VOLUMES
+# VOLUMES (sur le SSD système, volontairement hors du disque Data répliqué)
 # ─────────────────────────────────────────────────────────────────────────────
 volumes:
-
-  # Données Prometheus (séries temporelles, index TSDB)
   prometheus_data:
-
-  # Données Loki (chunks de logs compressés)
   loki_data:
-
-  # NOTE : grafana_data (volume SQLite) supprimé — Grafana persiste désormais
-  # sa configuration dans PostgreSQL (base grafana). Conservé en commentaire
-  # pour traçabilité de la migration (ADR-005, juin 2026).
+  alloy_data:
+  grafana_data:

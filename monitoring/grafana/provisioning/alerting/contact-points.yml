@@ -1,0 +1,15 @@
+# Point de contact des alertes : Discord (salon privé administrateur).
+# L'URL du webhook est un SECRET : elle vient de la variable d'environnement
+# DISCORD_WEBHOOK_URL (fichier .env, ignoré par Git), jamais écrite ici.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: discord-admin
+    receivers:
+      - uid: discord-admin
+        type: discord
+        disableResolveMessage: false
+        settings:
+          url: $DISCORD_WEBHOOK_URL
+          use_discord_username: false

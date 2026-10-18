@@ -1,186 +1,186 @@
 # kiwinet-monitoring
 
-Stack d'observabilité interne de `Kiwinet`  
-Prometheus - cAdvisor - Node Exporter - Loki - Promtail - Grafana
+Supervision interne de Kiwinet : métriques, journaux, tableaux de bord et alertes.
+Prometheus, cAdvisor, Node Exporter, Loki, Grafana Alloy, Grafana.
+
+Répond à : **« Pourquoi ça a planté, et que se passe-t-il en ce moment ? »**
+Complète Uptime Kuma (dossier `uptime/`), qui répond à « mon service est-il en ligne ? ».
 
 ---
 
-## Rôle de ce repo
-
-Ce repo déploie la **stack d'observabilité interne** : métriques système, métriques containers, et agrégation de logs. Il répond à la question : **Pourquoi ça a planté? Et qu'est-ce qui se passe en ce moment ?**
-
-C'est la couche complémentaire à Uptime Kuma (qui surveille la disponibilité externe). Grafana est le tableau de bord unifié qui consomme à la fois les métriques Prometheus et les logs Loki.
+## Architecture
 
 ```
-VM hôte
-    │
-    ├── Node Exporter  ──────────────────────────────┐
-    │   (CPU, RAM, disk, réseau)                     │
-    │                                                ▼
-    ├── cAdvisor  ──────────────────────────→  Prometheus
-    │   (métriques par container Docker)             │
-    │                                                │
-    ├── Promtail  ──────────────────────────→  Loki  │
-    │   (collecte logs Docker + système)             │
-    │                                                ▼
-    └────────────────────────────────────→  Grafana
-                                            (dashboards + Explore)
-                                                     │
-                                                     ▼
-                                         grafana.kiwinet.me (HTTPS, auth)
+                 serveur x86 (Debian 13)
+  ┌──────────────────────────────────────────────────────────────┐
+  │  Node Exporter (réseau hôte) ──┐                             │
+  │  cAdvisor ─────────────────────┼──▶ Prometheus ──┐           │
+  │  Loki, Alloy, Grafana (métriques propres) ──────▶│           │
+  │                                                  ▼           │
+  │  Docker (via proxy de socket, lecture seule) ─┐            Grafana ──▶ Traefik ──▶ Internet
+  │  Journal systemd de l'hôte (lecture seule) ───┴──▶ Alloy ──▶ Loki ──▶│   (HTTPS, auth)
+  │                                                                │
+  │                              alertes Grafana ──▶ webhook Discord
+  └──────────────────────────────────────────────────────────────┘
 ```
 
----
+| Réseau Docker  | Rôle | Membres |
+|----------------|------|---------|
+| `monitoring`   | interne à la supervision (pont `br-monitoring`) | tous, sauf Node Exporter |
+| `proxy`        | exposition par Traefik | Grafana seulement |
+| `db`           | PostgreSQL mutualisé | Grafana seulement |
+| `socket-proxy` | proxy de socket Docker en lecture seule | Alloy seulement (avec Traefik) |
 
-## Structure du repo
-
-```
-kiwinet-monitoring/
-├── docker-compose.yml
-├── prometheus/
-│   └── prometheus.yml          ← targets de scrape (cAdvisor, node-exporter)
-├── loki/
-│   └── loki.yml                ← config stockage et rétention Loki
-└── promtail/
-    └── promtail.yml            ← config collecte logs (Docker socket + /var/log)
-```
-
----
-
-## Architecture réseau
-
-La stack utilise **deux réseaux Docker distincts** :
-
-```
-Réseau monitoring (bridge interne - isolé) :
-    prometheus  ←  cadvisor
-    prometheus  ←  node-exporter
-    loki        ←  promtail
-    grafana     →  prometheus
-    grafana     →  loki
-
-Réseau proxy (bridge externe - partagé avec Traefik) :
-    grafana  →  grafana.kiwinet.me  (HTTPS, SSL Let's Encrypt, auth-basic)
-```
-
-Seul Grafana est exposé publiquement. Prometheus, Loki, cAdvisor et Node Exporter ne sont pas accessibles depuis l'extérieur.
+Aucun port n'est publié par la pile. Seul Grafana est joignable depuis Internet, par Traefik.
 
 ---
 
 ## Composants
 
-### Prometheus
+| Composant | Image (épinglée par empreinte dans le compose) | Rôle |
+|-----------|-----------------------------------------------|------|
+| Prometheus | `prom/prometheus` | stockage des métriques, 30 jours ou 10 Go |
+| cAdvisor | `ghcr.io/google/cadvisor` | métriques par conteneur |
+| Node Exporter | `prom/node-exporter` | métriques de l'hôte (CPU, mémoire, disques, réseau) |
+| Loki | `grafana/loki` | stockage des journaux, 15 jours |
+| Alloy | `grafana/alloy` | collecte des journaux (remplace Promtail, fin de vie) |
+| Grafana | `grafana/grafana` | tableaux de bord, alertes ; base dans PostgreSQL |
 
-Collecte et stocke les métriques en séries temporelles. Configure via `prometheus/prometheus.yml`.
-
-- Scrape interval : 15 secondes
-- Rétention : 15 jours (`--storage.tsdb.retention.time=15d`)
-- Sources : cAdvisor (containers) + Node Exporter (système)
-
-### cAdvisor
-
-Collecte les métriques Docker en temps réel : CPU, mémoire, réseau, I/O par container. Tourne en mode `privileged` avec accès aux pseudo-systèmes de fichiers `/proc`, `/sys`, `/var/lib/docker`.
-
-### Node Exporter
-
-Collecte les métriques système de la VM hôte : CPU global, RAM, utilisation disque, trafic réseau. Tourne en mode `pid: host` pour accéder aux processus de la machine hôte.
-
-### Loki
-
-Agrège et indexe les logs. Reçoit les entrées de Promtail. Accessible via Grafana (Explore → Loki).
-
-**Point critique - permissions Loki**  
-Le container doit tourner avec `user: "0"` et monter son volume sur `/loki` (pas `/tmp/loki`) pour éviter les erreurs de permission à l'initialisation.
-```yaml
-loki:
-  user: "0"
-  volumes:
-    - loki_data:/loki
-```
-
-### Promtail
-
-Agent de collecte de logs. Lit le Docker socket pour récupérer les logs de tous les containers, et remonte les logs système depuis `/var/log` et pousse vers Loki.
-
-### Grafana
-
-Interface de visualisation unifiée. Consomme Prometheus (métriques) et Loki (logs).
-
-- Exposé sur `grafana.kiwinet.me` via Traefik
-- Protégé par `auth-basic@file` (middleware Traefik)
-- Certificat SSL Let's Encrypt géré automatiquement par Traefik
+Tous les services ont : image épinglée (`tag@sha256:<index multi-architecture>`), rotation des
+journaux (10 Mo, 3 fichiers), limite de mémoire, `no-new-privileges`. Sauf mention contraire
+ci-dessous : `cap_drop: ALL`, système de fichiers en lecture seule, utilisateur non root.
 
 ---
 
-## Dashboards importés
+## Choix de sécurité et leur coût
 
-| Dashboard                       | ID Grafana | Data source | Contenu                        |
-|---------------------------------|------------|-------------|--------------------------------|
-| Node Exporter Full              | `1860`     | Prometheus  | CPU, RAM, disk, réseau VM      |
-| cAdvisor métriques containers   | `19792`    | Prometheus  | Métriques par container Docker |
+**Node Exporter en réseau hôte.** La documentation officielle l'exige pour mesurer la machine
+et non le conteneur (`--path.rootfs`, réseau hôte, PID hôte). Sans cela, les disques
+`Libraries` et `Data` et le trafic réseau réels sont invisibles. Conséquence : il écoute sur
+la machine elle-même, **hors des règles `DOCKER-USER`**. Seul `ufw` le filtre (refus par
+défaut en entrée). Une seule règle l'ouvre, et seulement au pont `br-monitoring` :
 
-**Logs :** consultés via l'explorateur dans Grafana. Les dashboards communautaires Loki (13639, 15141) présentent des variables orphelines (`DS_LOKI`) et ne sont plus maintenus - Explore reste donc l'interface recommandée.
+```bash
+sudo ufw allow in on br-monitoring to any port 9100 proto tcp comment 'Prometheus vers Node Exporter'
+```
+
+Les métriques exposées sont en lecture seule. Si cette règle manque, Prometheus signale la
+cible injoignable (alerte `cible-injoignable`). Aucune règle ne l'ouvre au réseau local.
+
+**cAdvisor est très privilégié par nature.** L'image officielle demande `privileged` et l'accès
+au socket Docker. Risque assumé, limité : aucun port publié, réseau `monitoring` seulement.
+Il ne peut donc pas être durci comme les autres (ni `cap_drop`, ni lecture seule).
+
+**Alloy tourne en root dans le conteneur** (comme son image), mais sans aucune capacité, en
+lecture seule, et **sans accès au socket Docker** : il lit les conteneurs par le proxy de
+socket. Le journal systemd est monté en lecture seule. Les lignes de `sudo` sont écartées
+avant l'envoi à Loki (elles contiennent les commandes saisies, arguments compris).
+
+**Proxy de socket.** Il autorise la lecture des conteneurs. Tout client de ce proxy peut lire
+les variables d'environnement des conteneurs par l'inspection : c'est le cas de Traefik et
+d'Alloy. Les secrets de cette pile passent donc par `.env`, jamais par un fichier versionné,
+mais restent visibles par ces deux clients. Limite connue.
+
+**Grafana exposé.** Limitation de débit, authentification de base Traefik, puis connexion
+Grafana. Grafana OSS n'a pas de double authentification. Protection renforcée en attendant
+la restriction au réseau de confiance (WireGuard). Pas d'inscription, pas d'accès anonyme,
+ni télémétrie, ni installation automatique de plugins.
+
+**Le réseau `monitoring` n'est pas `internal`** : ses conteneurs ont un accès sortant. Le
+rendre `internal` empêcherait Prometheus de joindre Node Exporter par la passerelle de l'hôte.
+
+---
+
+## Alertes (Grafana vers Discord)
+
+Fichiers versionnés dans `grafana/provisioning/alerting/`. Le webhook est un **secret** :
+variable `DISCORD_WEBHOOK_URL` du `.env`, jamais dans Git.
+
+| Règle | Condition | Durée |
+|-------|-----------|-------|
+| `disque-ssd-data` | SSD système ou Data utilisé à plus de 85 % | 15 min |
+| `disque-libraries` | Libraries utilisé à plus de 97 % (presque plein par nature, à ajuster) | 30 min |
+| `memoire-faible` | mémoire disponible sous 10 % | 10 min |
+| `swap-sature` | swap utilisé à plus de 85 % | 15 min |
+| `cible-injoignable` | une cible Prometheus ne répond plus (alerte aussi sans donnée) | 5 min |
+| `conteneur-redemarre` | plus de 2 démarrages en 15 minutes | immédiat |
+
+Seule `cible-injoignable` alerte en cas de donnée absente ou d'erreur de requête : si
+Prometheus tombe, c'est elle seule qui prévient, les autres ne font pas de bruit en cascade.
+
+Changer de cible un jour : modifier `policies.yml` (champ `receiver`) et le point de contact ;
+les règles ne changent pas. Limite : si le serveur s'arrête, aucune alerte ne part. Une
+vérification externe relève d'Uptime Kuma.
+
+---
+
+## Grafana provisionné par fichiers
+
+| Fichier | Contenu |
+|---------|---------|
+| `grafana/provisioning/datasources/` | sources Prometheus et Loki (UID fixes) |
+| `grafana/provisioning/dashboards/` | fournisseur : dossier « Kiwinet » |
+| `grafana/provisioning/alerting/` | point de contact, politique, règles |
+| `grafana/dashboards/` | tableaux de bord JSON |
+
+Tableaux de bord, tels que publiés sur grafana.com :
+Node Exporter Full (1860, révision 45), cAdvisor (19792, révision 6, labels de projet et de
+service Compose conservés pour ses filtres). Les journaux se consultent par Explore, Loki.
+`allowUiUpdates: false` : le dépôt fait foi, exporter en JSON pour modifier.
+
+---
+
+## Prérequis
+
+- Réseaux externes existants : `proxy`, `db`, `socket-proxy`. Traefik et le proxy de socket actifs.
+- Base `grafana` et rôle `grafana` sur l'instance PostgreSQL (mot de passe dans `.env`).
+- Fichier `.env` créé depuis `env.example` (jamais versionné).
+- Règle `ufw` de Node Exporter (ci-dessus).
 
 ---
 
 ## Déploiement
 
-Ce repo est cloné sur la VM dans `/opt/kiwinet-monitoring/`. Le workflow est entièrement manuel (pas de CI/CD pour l'instant sur ce repo).
-
-**Prérequis :**
-- Réseau Docker `proxy` existant (`docker network create proxy`)
-- DNS A `grafana.kiwinet.me` → `<IP_PUBLIQUE>`
-- Traefik actif sur la VM
+Le dépôt est cloné sur le serveur ; tout changement passe par commit, push, puis :
 
 ```bash
-# Sur la machine locale
-git push origin main
-
-# Sur la VM
-cd /opt/kiwinet-monitoring
-git pull
-docker compose up -d
+git pull --ff-only
+docker compose config -q          # valide sans rien afficher
+docker compose up -d <service>    # un composant à la fois : node-exporter, cadvisor,
+                                  # prometheus, loki, alloy, grafana
 ```
 
----
+Ne pas utiliser `docker compose config` sans `-q` : il affiche les secrets.
 
-## Vérifications post-déploiement
+## Vérifications
 
-```bash
-# Tous les containers up ?
-docker compose ps
+- Prometheus, cibles : toutes à l'état `up` (une requête `up` dans Grafana, Explore).
+- Loki, Explore : les journaux apparaissent avec les labels `container`, `service`, et `job="journal"`.
+- Grafana : `curl --resolve` vers la route, réponse attendue `401` sans identifiants Traefik.
+- Alertes : bouton « Test » du point de contact `discord-admin` dans Grafana.
+- Après un redémarrage de la machine : tous les conteneurs reviennent seuls.
 
-# Prometheus scrape les targets ?
-# → Grafana : Connections > Data sources > Prometheus > Save & test
+## Activer les métriques de Traefik
 
-# Loki reçoit des logs ?
-# → Grafana : Explore → Loki → sélectionner un label → Run query
+Réseau dédié `traefik-metrics`, qui ne contient que Traefik et Prometheus (un Traefik compromis
+n'atteint ni Loki ni cAdvisor). Étapes : créer le réseau ; déclarer le point d'entrée des
+métriques côté Traefik (`kiwinet-services`, commit séparé, avec redémarrage de Traefik) ; puis
+ici, décommenter le réseau dans le compose (service et section `networks`) et le job
+`traefik` de `prometheus/prometheus.yml`.
 
-# Grafana accessible ?
-curl -I https://grafana.kiwinet.me
-# Attendu : HTTP 302 (redirect login) ou HTTP 200
-```
+## Mettre à jour une image
 
----
+Choisir une version stable couvrant amd64, lire ses notes de version, puis relever
+l'empreinte de l'**index multi-architecture** (celui du tag) : champ `digest` de
+`hub.docker.com/v2/repositories/<organisation>/<image>/tags/<tag>`, ou l'entête
+`Docker-Content-Digest` du registre pour GHCR. Une version qui corrige une faille de sécurité
+l'emporte sur la règle des deux semaines.
 
-## Infrastructure cible
+## Limites connues
 
-| Composant    | Détail                              |
-|--------------|-------------------------------------|
-| OS           | Debian GNU/Linux 13.3 (Trixie)      |
-| Architecture | ARM AArch64 (Freebox Delta)         |
-| RAM estimée  | ~500 Mo (stack complète)            |
-
-### Estimation RAM par service
-
-| Service                        | RAM estimée |
-|--------------------------------|-------------|
-| Prometheus                     | ~100 Mo     |
-| cAdvisor                       | ~50 Mo      |
-| Node Exporter                  | ~10 Mo      |
-| Loki                           | ~100 Mo     |
-| Promtail                       | ~50 Mo      |
-| Grafana                        | ~150 Mo     |
-| **Total**                      | ~460 Mo     |
-
-Marge confortable sur 12 Go avec Minecraft, Plex et la stack Traefik/web actifs.
+- Pas de healthcheck : l'outillage disponible dans chaque image n'est pas vérifié. Les services
+  reviennent par `restart: unless-stopped` (Grafana attend PostgreSQL en redémarrant).
+- Alloy en root sans capacités : un utilisateur non root demanderait de préparer le volume.
+- Aucune vérification externe : à traiter avec Uptime Kuma.
+- Journalisation de WebDAV : niveau par défaut, sans les requêtes ; à décider avant de la relever
+  (chemins et noms d'utilisateur entreraient dans Loki).
