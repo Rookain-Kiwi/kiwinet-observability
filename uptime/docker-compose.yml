@@ -1,55 +1,94 @@
 ###############################################################################
-# docker-compose.yml : Uptime Kuma Status Page
-# Projet  : kiwinet.me
-# VM      : Debian 13.3 ARM AArch64 (Freebox Delta)
-# Image   : louislam/uptime-kuma:2 (compatible linux/arm64)
-# URL     : https://status.kiwinet.me
+# docker-compose.yml : Page de statut et surveillance de disponibilité
+# Projet  : kiwinet.me, VPS Scaleway (x86_64)
+# Contenu : Uptime Kuma 2 (page de statut publique, alertes Discord)
+# Accès   : https://status.kiwinet.me (via Traefik : limitation de débit et
+#           en-têtes de sécurité ; page publique, administration protégée par
+#           la connexion Kuma et la double authentification TOTP)
+# Secrets : aucun dans ce fichier. Moniteurs, page de statut, webhook Discord
+#           et jetons de push vivent dans la base de Kuma (volume), pas dans Git.
+# Détail des choix : README.md et Décisions (Stack) dans le second brain Notion
 ###############################################################################
 
 services:
 
   # ───────────────────────────────────────────────────────────────────────────
-  # UPTIME KUMA : Page de statut et monitoring des services
+  # UPTIME KUMA : « mon service est-il en ligne ? »
+  # Image : variante slim (sans Chromium ni MariaDB embarquée, inutiles ici :
+  # moniteurs HTTP, TCP, DNS et push, base SQLite) et rootless (utilisateur
+  # `node` de l'image, jamais root). Épinglée par l'empreinte de l'index
+  # multi-architecture (méthode : monitoring/README.md, « Mettre à jour une image »).
+  # Le volume nommé recopie le propriétaire du dossier de l'image (`node`) :
+  # aucun chown à faire, aucune ligne `user:` à ajouter.
   # ───────────────────────────────────────────────────────────────────────────
   uptime-kuma:
-    image: louislam/uptime-kuma:2
+    image: louislam/uptime-kuma:2.5.6-slim-rootless@sha256:6eb4e96a7cbdb8a5d6779aa26dce2cb97dcea65b486856b9b2280f73a1d0adf4
     container_name: uptime-kuma
     restart: unless-stopped
 
-    dns:
-      - 1.1.1.1
-      - 9.9.9.9
-      - 192.168.1.254
+    # Durcissement : élévation de privilèges interdite, aucune capacité,
+    # système de fichiers en lecture seule (écriture : /app/data et /tmp).
+    # Lecture seule à valider au premier démarrage : en cas d'erreur
+    # d'écriture dans les journaux, la retirer et noter la raison au README.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+
+    # Rotation des journaux Docker : le pilote par défaut n'en fait aucune
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
     volumes:
-      # Stockage persistant des données (monitors, historique, configuration)
-      - ./data:/app/data
+      # Base SQLite, historique, captures : sur le SSD système du VPS
+      - uptime_kuma_data:/app/data
 
     networks:
       - proxy
 
+    # Valeur de départ, à ajuster après mesure (docker stats)
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+    # La vérification de santé est déjà définie dans l'image (délai de démarrage
+    # de 180 s) : pas de healthcheck ici.
+
     labels:
       - "traefik.enable=true"
 
-      # ── Routeur Uptime Kuma ────────────────────────────────────────────────
-      # Accessible sur https://status.kiwinet.me
-      # En-têtes de sécurité appliqués via le secure-headers dans dynamic.yml (kiwinet-infra)
+      # https://status.kiwinet.me : limitation de débit, puis en-têtes de
+      # sécurité (middlewares définis dans dynamic.vps.yml, kiwinet-services).
+      # Pas d'auth-basic : la page de statut est publique par conception.
+      # La connexion à l'administration passe par une WebSocket : seuls les
+      # limiteurs internes de Kuma freinent les tentatives (voir README).
       - "traefik.http.routers.uptime-kuma.rule=Host(`status.kiwinet.me`)"
       - "traefik.http.routers.uptime-kuma.entrypoints=websecure"
       - "traefik.http.routers.uptime-kuma.tls.certresolver=letsencrypt"
       - "traefik.http.services.uptime-kuma.loadbalancer.server.port=3001"
-      - "traefik.http.routers.uptime-kuma.middlewares=secure-headers@file"
+      - "traefik.http.routers.uptime-kuma.middlewares=rate-limit@file,secure-headers@file"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RÉSEAUX
 # ─────────────────────────────────────────────────────────────────────────────
 networks:
 
-  # Réseau frontal partagé : déclaré dans kiwinet-infra, utilisé en externe
+  # Réseau frontal partagé avec Traefik (créé hors de ce dépôt, doit exister
+  # avant le démarrage). Kuma ne rejoint aucun autre réseau.
   proxy:
     external: true
 
 # ─────────────────────────────────────────────────────────────────────────────
-# VOLUMES
+# VOLUMES (sur le SSD système du VPS)
+# Nom fixé pour ne pas dépendre du nom du dossier du projet Compose.
 # ─────────────────────────────────────────────────────────────────────────────
-volumes: {}
+volumes:
+  uptime_kuma_data:
+    name: uptime-kuma-data

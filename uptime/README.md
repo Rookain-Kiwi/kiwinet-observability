@@ -1,152 +1,176 @@
-# kiwinet-status
+# Uptime Kuma : page de statut et surveillance de disponibilité
 
-Page de statut publique et surveillance de disponibilité pour `Kiwinet`  
-Stack : Uptime Kuma - Let's Encrypt via Traefik - Discord webhook
+Page de statut publique de Kiwinet et alertes de disponibilité vers Discord.
+Uptime Kuma 2, déployé sur le **VPS Scaleway**, derrière Traefik.
 
----
-
-## Rôle de ce repo
-
-Ce repo déploie **Uptime Kuma**, l'outil de surveillance externe de l'infrastructure. Il répond à une question simple : **Mes services sont-il en ligne en ce moment ?**
-
-C'est la couche de monitoring *orientée disponibilité*, distincte de la stack Prometheus/Grafana qui s'occupe des métriques internes et des logs.
-
-```
-                    ┌──────────────────────────────────┐
-                    │         Monitoring               │
-                    │                                  │
-  Question externe  │  Uptime Kuma  ← kiwinet-status   │
-  "Est-ce en ligne?"│      │                           │
-                    │      ▼                           │
-                    │  status.kiwinet.me (public)      │
-                    └──────────────────────────────────┘
-
-                    ┌──────────────────────────────────┐
-                    │         Observabilité interne    │
-  Question interne  │  Prometheus + Loki + Grafana     │
-  "Pourquoi ça a    │  ← kiwinet-monitoring            │
-   planté ?"        │      │                           │
-                    │      ▼                           │
-                    │  grafana.kiwinet.me (privé)      │
-                    └──────────────────────────────────┘
-```
+Répond à : **« Mon service est-il en ligne ? »**
+Complète la supervision interne (dossier `monitoring/`), qui répond à « Pourquoi ça a planté ? ».
 
 ---
 
-## Structure du repo
+## Pourquoi sur le VPS
+
+Uptime Kuma tourne hors du serveur qu'il surveille. Si le serveur ou la connexion Internet de la
+maison tombe, l'alerte part quand même et la page de statut reste en ligne. Une seule instance
+suffit : une seconde doublerait les sauvegardes, les webhooks et les mises à jour sans gain.
 
 ```
-kiwinet-status/
-├── docker-compose.yml      ← déploiement Uptime Kuma
-├── .gitignore              ← exclut data/
-└── data/                   ← base SQLite Uptime Kuma (non commitée)
+        Internet
+           │
+           ▼
+   ┌───────────────────────────── VPS ──────────────┐
+   │  Traefik ──▶ Uptime Kuma ──┬──▶ services publics du serveur (HTTPS)
+   │              (réseau proxy)├──▶ Minecraft, site (VPS)
+   │                            └──▶ alertes ──▶ webhook Discord
+   └────────────────────────────────────────────────┘
+        ▲
+        └── signaux « push » du serveur (services du réseau local, voir plus bas)
 ```
 
-Le répertoire `data/` contient la base SQLite avec la configuration des monitors, les identifiants et l'historique. Il n'est **jamais commité**.
+Décisions liées : séparation statut public et observabilité interne, page publique sans
+authentification, alertes Discord uniquement. Détail dans « Décisions (Stack) », second brain Notion.
+
+---
+
+## Ce que ce dossier déploie
+
+| Élément | Choix |
+|---------|-------|
+| Image | `louislam/uptime-kuma`, version `2.5.6`, variante `slim-rootless`, épinglée par l'empreinte de l'index multi-architecture |
+| Base | SQLite, dans le volume nommé `uptime-kuma-data` (SSD système du VPS) |
+| Réseau | `proxy` seulement ; aucun port publié |
+| Route Traefik | `rate-limit` puis `secure-headers` ; pas d'`auth-basic` (page publique) |
+| Durcissement | `no-new-privileges`, `cap_drop: ALL`, système de fichiers en lecture seule (+ `tmpfs` sur `/tmp`), utilisateur non root, limite de mémoire, rotation des journaux (10 Mo, 3 fichiers) |
+
+**Slim et rootless.** La variante slim n'embarque ni Chromium ni MariaDB : seuls le type de
+moniteur « Browser Engine » et la base MariaDB embarquée sont concernés (la documentation
+officielle, page « Docker Tags », ne liste pas d'autre différence). Un moniteur « Browser Engine »
+imposerait la variante complète. La variante rootless fait tourner Kuma sous l'utilisateur `node`
+de l'image ; le moniteur de type Docker n'y fonctionne pas, ce qui est sans effet ici (aucun socket
+Docker n'est monté).
+
+**Volume nommé.** Un volume neuf recopie le propriétaire du dossier préparé par l'image (`node`) :
+aucun `chown`, aucune ligne `user:`. Un dossier lié au dépôt aurait appartenu à root et provoqué
+« permission denied » avec `cap_drop: ALL`.
+
+Aucun secret dans ce dossier : moniteurs, page de statut, webhook Discord et jetons de push
+sont dans la base de Kuma. Pas de `.env`.
+
+---
+
+## Sécurité : limites connues
+
+- **La connexion à l'administration est servie sur la même adresse publique que la page de
+  statut.** Protections : mot de passe long, **double authentification TOTP** (à activer dès la
+  création du compte), limiteurs internes de Kuma.
+- **Les tentatives de connexion passent par une WebSocket** : la limitation de débit de Traefik
+  ne les voit pas une à une. Les freins sont ceux de Kuma (code de la 2.5.6, `server/rate-limiter.js`) :
+  20 connexions par minute et 30 vérifications TOTP par minute, **compteurs globaux, non par
+  adresse**. Conséquence : un tiers peut verrouiller l'accès à l'administration en envoyant de
+  mauvaises tentatives (la surveillance et la page de statut continuent). Remède prévu : réserver
+  l'administration au réseau de confiance (WireGuard), comme pour les autres interfaces.
+- **Création du compte à l'installation.** Tant qu'aucun compte n'existe, le premier visiteur peut
+  le créer : le faire immédiatement après le premier démarrage (voir « Premier démarrage »).
+- **Les URL de push sont des secrets** : le jeton qu'elles contiennent est leur seule protection.
+  Elles ne vont jamais dans Git.
+- **Le VPS lui-même n'est surveillé par personne** : s'il tombe, aucune alerte ne part et la page
+  de statut disparaît. Limite assumée.
+- **Pas de sauvegarde du volume pour l'instant** : moniteurs, page de statut et webhook seraient à
+  ressaisir en cas de perte.
+- **Mise à jour manuelle** : voir « Mettre à jour l'image ».
+
+---
+
+## Prérequis
+
+- Réseau Docker `proxy` existant (créé par le Traefik du VPS).
+- Traefik actif, avec les middlewares `rate-limit` et `secure-headers` (fichier dynamique de
+  `kiwinet-services`), le point d'entrée `websecure` et le résolveur `letsencrypt`.
+- Enregistrement DNS de `status.kiwinet.me` vers le VPS.
+- Place disque : l'image slim fait environ 180 Mo compressée ; le disque du VPS est petit, à
+  surveiller.
 
 ---
 
 ## Déploiement
 
-Ce repo est cloné sur la VM dans `/opt/kiwinet-status/`. Le workflow est entièrement manuel pour le status (pas de CI/CD pour l'instant sur ce repo).
-
-**Prérequis :**
-- Réseau Docker `proxy` existant (`docker network create proxy`)
-- DNS A `status.kiwinet.me` → `IP Fixe`
-- Traefik actif sur la VM
+Le dépôt est cloné sur le VPS, en HTTPS, sans clé (dépôt public, lecture seule). Aucune
+modification locale sur le serveur : tout passe par commit, push, puis :
 
 ```bash
-# Sur la machine locale
-git push origin main
-
-# Sur la VM
-cd /opt/kiwinet-status
-git pull
+git pull --ff-only
+docker compose config -q          # valide sans rien afficher
 docker compose up -d
+docker compose logs --tail 50     # contrôle du démarrage
 ```
 
-Uptime Kuma sera accessible à `https://status.kiwinet.me` avec certificat Let's Encrypt géré automatiquement par Traefik.
+Ne pas utiliser `docker compose config` sans `-q` : il peut afficher des secrets.
+
+### Premier démarrage
+
+1. Choisir **SQLite** à l'écran de choix de la base.
+2. Créer immédiatement le compte administrateur (mot de passe long).
+3. Activer la **double authentification TOTP** dans les réglages du compte.
+4. Régler la durée de conservation de l'historique (disque limité).
+5. Créer le point de contact Discord (webhook propre à Uptime Kuma, distinct de celui de Grafana).
+
+### Vérifications
+
+- `docker ps` : le conteneur passe à « healthy » (délai de démarrage de 180 s).
+- La page de statut répond en HTTPS avec un certificat valide ; l'administration se charge
+  (WebSocket comprise).
+- Un moniteur volontairement faux déclenche une alerte Discord, puis le retour à la normale.
+- Si le système de fichiers en lecture seule provoque une erreur d'écriture, retirer `read_only`
+  et noter la raison ici.
 
 ---
 
-## Intégration Traefik
+## Moniteurs
 
-Uptime Kuma s'intègre à Traefik via labels Docker dans `docker-compose.yml`. Pas de configuration dans `dynamic.yml` - le container est découvert automatiquement.
+La liste vit dans la base de Kuma (aucun fichier à versionner). Cibles prévues :
 
-```
-Internet → Traefik (:443) → container uptime-kuma (:3001)
-```
+| Service | Type | Note |
+|---------|------|------|
+| Jellyfin, Music Assistant, Kiwix, pgAdmin, Grafana, tableau de bord Traefik, WebDAV, Home Assistant, site principal | HTTP(S) | Un code `401` doit être décidé moniteur par moniteur (voir ci-dessous) |
+| Minecraft | TCP | Port brut, hors Traefik |
+| Seedbox (quand elle sera déployée) | HTTP(S) | Exposée par Traefik |
+| Pi-hole | Push | Non exposé ; signal envoyé depuis le serveur à la bascule du DNS du réseau local |
 
-Middleware appliqué : `secure-headers@file` (headers de sécurité HTTP).  
-Pas d'`auth-basic` - la page de statut est publique par conception.
+**Le code `401` n'a pas le même sens partout.** Quand il vient de l'authentification de base de
+Traefik, il répond même si le conteneur derrière est tombé : le moniteur resterait « en ligne » à
+tort. Quand il vient du service lui-même (WebDAV), il prouve que le service répond. À trancher
+et à tester (arrêt d'un conteneur) pour chaque cible.
 
----
+Réglages recommandés :
 
-## Monitors configurés
+| Paramètre | Valeur | Raison |
+|-----------|--------|--------|
+| Essais | 2 | Tolère un accroc ponctuel (le défaut des nouveaux moniteurs en v2 est 0) |
+| Timeout | 10 s | Détecte une vraie panne sans faux positif |
+| Méthode HTTP | GET | Home Assistant rejette HEAD avec un 405 |
 
-| Monitor            | Type     | Cible                                | Note                         |
-|--------------------|----------|--------------------------------------|------------------------------|
-| Routeur            | HTTP(s)  | `https://freebox.kiwinet.me`         | Port admin non publié        |
-| Site Principal     | HTTP(s)  | `https://kiwinet.me`                 |                              |
-| Traefik            | HTTP(s)  | `https://traefik.kiwinet.me`         | HTTP 401 accepté             |
-| Plex               | HTTP(s)  | `https://plex.kiwinet.me`            | HTTP 401 accepté             |
-| Status             | HTTP(s)  | `https://status.kiwinet.me`          |                              |
-| Grafana            | HTTP(s)  | `https://grafana.kiwinet.me`         |                              |
-| Home Assistant     | HTTP(s)  | `https://hub.kiwinet.me`             | GET requis (405 sur HEAD)    |
-| Minecraft          | TCP Port | `minecraft.kiwinet.me:25565`         | TCP brut, hors Traefik       |
-| Komga              | HTTP(s)  | `https://komga.kiwinet.me`           |                              |
-| Calibre-Web        | HTTP(s)  | `https://calibre.kiwinet.me`         |                              |
+Un moniteur de l'instance sur elle-même n'est pas créé : si Kuma tombe, il ne peut pas l'indiquer.
 
-Les monitors Traefik et Plex retournent un HTTP 401 (authentification requise). Uptime Kuma est configuré pour accepter ce code comme réponse valide - le service est *up*, mais protégé.
-
----
-
-## Configuration des monitors
-
-| Paramètre      | Valeur recommandée | Raison                                                        |
-|----------------|--------------------|---------------------------------------------------------------|
-| Essais         | 2                  | Tolère un accroc DNS ponctuel avant de déclarer down          |
-| Timeout        | 10s                | Détecte une vraie panne sans générer de faux positif          |
-| Méthode HTTP   | GET                | Home Assistant rejette HEAD avec un 405                       |
+**Pas de directive `dns:`** : le VPS résout les noms publics normalement. Si de fausses alertes
+`ENOTFOUND` apparaissent, revoir ce point.
 
 ---
 
-## Résolution DNS
+## Alertes
 
-Le container Uptime Kuma utilise des resolvers DNS publics en fallback via la directive `dns:` du compose :
-
-```yaml
-dns:
-  - 1.1.1.1
-  - 9.9.9.9
-  - 192.168.1.254
-```
-
-Sans cette directive, Docker hérite du resolver de l'hôte (`192.168.1.254`, Freebox uniquement). Une instabilité ponctuelle du resolver Freebox provoque des erreurs `ENOTFOUND` et de fausses alertes sur tous les monitors, même pour des services parfaitement accessibles par IP.
+Webhook Discord propre à Uptime Kuma (révocation indépendante de celui de Grafana, source
+identifiable). Notification à chaque changement d'état (panne, retour). La page de statut
+publique est servie par `status.kiwinet.me`, sans authentification.
 
 ---
 
-## Pages et alertes
+## Mettre à jour l'image
 
-**Page de statut publique :** `https://status.kiwinet.me/status/kiwinet`
-
-**Alertes Discord :**  
-Webhook configuré sur `#monitoring-kiwinet` - salon privé dédié, accessible uniquement par l'administrateur. Notifications envoyées à chaque changement d'état (down / recovery).
-
----
-
-## Philosophie de nommage
-
-L'URL `status.kiwinet.me` nomme une **fonction** (consulter le statut), pas un outil.  
-Cela contraste avec `grafana.kiwinet.me` qui révèle la stack - acceptable car privé et protégé par authentification.
-
----
-
-## Infrastructure cible
-
-| Composant    | Détail                                         |
-|--------------|------------------------------------------------|
-| OS           | Debian GNU/Linux 13.3 (Trixie)                 |
-| Architecture | ARM AArch64 (Freebox Delta)                    |
-| Image Docker | `louislam/uptime-kuma:1`                       |
-| Réseau       | `proxy` (bridge externe, partagé avec Traefik) |
+Même méthode que `monitoring/README.md` (section « Mettre à jour une image ») : version stable
+couvrant amd64, lecture des notes de version, puis relève de l'empreinte de l'**index
+multi-architecture** (champ `digest` de
+`hub.docker.com/v2/repositories/louislam/uptime-kuma/tags/<tag>`). Garder la variante
+`slim-rootless`. Après la mise à jour : `docker compose pull`, `docker compose up -d`, contrôle du
+statut « healthy ». Lire les notes de version avant chaque mise à jour (une version peut modifier
+la base) : la copie du volume est la seule sortie en cas de problème, il n'y a pas de retour arrière
+automatique.
