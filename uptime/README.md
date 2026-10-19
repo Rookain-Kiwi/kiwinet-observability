@@ -53,6 +53,12 @@ Docker n'est monté).
 aucun `chown`, aucune ligne `user:`. Un dossier lié au dépôt aurait appartenu à root et provoqué
 « permission denied » avec `cap_drop: ALL`.
 
+**nscd.** Kuma tente de lancer `nscd` (cache DNS embarqué) au démarrage avec `sudo service nscd
+start`. La commande échoue ici, par construction : `sudo` a besoin d'élever ses privilèges, ce
+qu'interdisent `no-new-privileges` et `cap_drop: ALL`. L'échec est sans effet (une ligne de
+journal). Désactiver le réglage « NSCD » dans l'interface supprime le message ; il n'y a de toute
+façon pas de cache DNS local.
+
 Aucun secret dans ce dossier : moniteurs, page de statut, webhook Discord et jetons de push
 sont dans la base de Kuma. Pas de `.env`.
 
@@ -77,6 +83,14 @@ sont dans la base de Kuma. Pas de `.env`.
   de statut disparaît. Limite assumée.
 - **Pas de sauvegarde du volume pour l'instant** : moniteurs, page de statut et webhook seraient à
   ressaisir en cas de perte.
+- **Disque du VPS petit et sans alerte** : la supervision de `monitoring/` ne couvre que le
+  serveur. Un disque plein affecterait tous les services du VPS. Une mise à jour d'image demande
+  de télécharger la nouvelle version (environ 0,8 Go) tant que l'ancienne est présente : prévoir
+  de la place ou retirer l'ancienne image avant.
+- **Le vert de certains moniteurs ne prouve pas le service** (codes `401` de Traefik, moniteurs
+  sur la machine de Kuma) : voir « Moniteurs ».
+- **La clé d'API de l'intégration Home Assistant est sensible** : voir « Intégration Home
+  Assistant ».
 - **Mise à jour manuelle** : voir « Mettre à jour l'image ».
 
 ---
@@ -87,8 +101,9 @@ sont dans la base de Kuma. Pas de `.env`.
 - Traefik actif, avec les middlewares `rate-limit` et `secure-headers` (fichier dynamique de
   `kiwinet-services`), le point d'entrée `websecure` et le résolveur `letsencrypt`.
 - Enregistrement DNS de `status.kiwinet.me` vers le VPS.
-- Place disque : l'image slim fait environ 180 Mo compressée ; le disque du VPS est petit, à
-  surveiller.
+- Place disque : l'image slim fait environ 180 Mo compressée et environ 0,8 Go sur disque
+  (mesuré au déploiement : 79 % puis 88 % d'occupation sur 9 Go). Le disque du VPS est petit et
+  rien ne l'alerte (voir « Sécurité : limites connues »).
 
 ---
 
@@ -127,19 +142,41 @@ Ne pas utiliser `docker compose config` sans `-q` : il peut afficher des secrets
 
 ## Moniteurs
 
-La liste vit dans la base de Kuma (aucun fichier à versionner). Cibles prévues :
+La liste vit dans la base de Kuma (aucun fichier à versionner). Moniteurs en place :
 
-| Service | Type | Note |
-|---------|------|------|
-| Jellyfin, Music Assistant, Kiwix, pgAdmin, Grafana, tableau de bord Traefik, WebDAV, Home Assistant, site principal | HTTP(S) | Un code `401` doit être décidé moniteur par moniteur (voir ci-dessous) |
-| Minecraft | TCP | Port brut, hors Traefik |
-| Seedbox (quand elle sera déployée) | HTTP(S) | Exposée par Traefik |
-| Pi-hole | Push | Non exposé ; signal envoyé depuis le serveur à la bascule du DNS du réseau local |
+| Service | Type | Codes acceptés | Sur la page publique | Ce que le vert prouve |
+|---------|------|----------------|----------------------|------------------------|
+| Site principal | HTTP(S) | `200-299` | oui | Le site répond (même machine que Kuma, voir plus bas) |
+| Jellyfin | HTTP(S) | `200-299` | oui | Le service répond (la redirection est suivie) |
+| Home Assistant | HTTP(S), GET | `200-299` | oui | Le service répond |
+| Music Assistant | HTTP(S) | `200-299` | oui | Le service répond |
+| WebDAV | HTTP(S), chemin du service | `401` seulement | oui | Le service répond : le `401` vient du service lui-même (royaume propre à WebDAV), pas de Traefik |
+| Kiwix | HTTP(S) | `401` seulement | oui (démonstration) | **La chaîne d'accès seulement** (voir ci-dessous) |
+| Minecraft | GameDig | n/a | oui | Un serveur Minecraft répond à travers Traefik (même machine que Kuma) |
+| pgAdmin, Grafana | HTTP(S) | `401` seulement | non | **La chaîne d'accès seulement** (voir ci-dessous) |
+| Tableau de bord Traefik | HTTP(S) | `401` seulement | non | Traefik répond : le `401` est celui de Traefik, c'est bien lui que l'on teste |
+| WireGuard Easy | HTTP(S) | `200-299` | non | La page de connexion répond ; rien sur l'état du tunnel VPN |
+| Seedbox (quand elle sera déployée) | HTTP(S) | à définir | à définir | Exposée par Traefik |
+| Pi-hole | Push | n/a | non | Non exposé ; signal envoyé depuis le serveur à la bascule du DNS du réseau local |
 
-**Le code `401` n'a pas le même sens partout.** Quand il vient de l'authentification de base de
-Traefik, il répond même si le conteneur derrière est tombé : le moniteur resterait « en ligne » à
-tort. Quand il vient du service lui-même (WebDAV), il prouve que le service répond. À trancher
-et à tester (arrêt d'un conteneur) pour chaque cible.
+**Limites des codes `401`.** Quand le `401` vient de l'authentification de base de Traefik
+(pgAdmin, Kiwix, Grafana), il est renvoyé avant que la requête n'atteigne le conteneur : un
+conteneur tombé répondrait quand même `401`, et le moniteur resterait « en ligne ». Ces moniteurs
+prouvent que la chaîne d'accès (DNS, box, Traefik) fonctionne, pas le service. Décision : accepter
+cette limite ; Grafana alerte déjà sur les conteneurs du serveur. Aucun identifiant de Traefik
+n'est donné à Kuma : ils seraient stockés dans une base exposée sur Internet et ouvriraient aussi
+le tableau de bord de Traefik.
+
+**Moniteurs sur la même machine que Kuma** (site principal, Minecraft). La connexion part du VPS
+vers sa propre adresse publique ; d'après le fonctionnement du système (non testé ici), elle est
+probablement rebouclée en interne sans passer par le pare-feu de Scaleway. Le vert signifie « le
+service tourne et Traefik le relaie », pas « Internet l'atteint ». Si tout le VPS tombe, aucune
+alerte ne part (limite déjà citée).
+
+**Minecraft.** Le port de jeu est relayé par un routeur TCP de Traefik (`HostSNI(*)`, sans TLS)
+vers le conteneur. Un moniteur TCP simple serait vert même avec le conteneur éteint (Traefik
+accepte la connexion lui-même) : GameDig attend une vraie réponse de serveur Minecraft. Aucun
+certificat n'est observable, d'où un capteur de certificat « Indisponible » dans Home Assistant.
 
 Réglages recommandés :
 
@@ -153,6 +190,40 @@ Un moniteur de l'instance sur elle-même n'est pas créé : si Kuma tombe, il ne
 
 **Pas de directive `dns:`** : le VPS résout les noms publics normalement. Si de fausses alertes
 `ENOTFOUND` apparaissent, revoir ce point.
+
+---
+
+## Page de statut publique
+
+Identifiant `kiwinet` : `https://status.kiwinet.me/status/kiwinet`, l'adresse de l'ancienne page.
+
+- **Affichés** : site principal, Jellyfin, Home Assistant, Music Assistant, WebDAV, Kiwix, Minecraft.
+- **Non affichés** : pgAdmin, Grafana, tableau de bord Traefik, WireGuard Easy. Ils afficheraient à
+  tous la liste des interfaces d'administration, et leur disponibilité en direct. Les moniteurs
+  restent actifs pour les alertes privées.
+- **Kiwix est affiché volontairement**, comme démonstration pour les visiteurs. Son vert ne prouve
+  que la chaîne d'accès.
+- **Adresses des services** : masquées (option d'envoi de l'URL désactivée pour chaque moniteur).
+- Le pied de page indique l'hébergeur : choix assumé.
+
+Contrôle fait à la mise en service, en lecture anonyme : les données publiques ne contiennent ni
+adresse, ni port, ni message de battement ; les badges des moniteurs non publiés répondent « N/A » ;
+`/metrics` répond `401`.
+
+---
+
+## Intégration Home Assistant
+
+L'intégration officielle de Home Assistant (noyau, depuis 2025.8) demande l'adresse de l'instance et
+une **clé d'API** (réglages de Kuma, « Clés d'API »), et interroge Kuma toutes les 30 secondes.
+
+- La clé donne accès à `/metrics`, qui, d'après le fonctionnement de Kuma (non vérifié ici), décrit
+  tous les moniteurs, privés compris. **C'est un secret sensible** : il ne vit que dans Home
+  Assistant, jamais dans Git ni dans une conversation.
+- Prévoir une date d'expiration à la création, et révoquer la clé si l'intégration est retirée.
+- Un changement d'instance (nouvelle base) invalide les anciennes clés : créer une nouvelle clé et
+  ré-authentifier l'intégration.
+- Le capteur « Expiration du certificat » est indisponible pour Minecraft : normal (aucun TLS).
 
 ---
 
