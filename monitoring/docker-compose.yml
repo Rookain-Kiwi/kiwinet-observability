@@ -49,8 +49,11 @@ services:
       - "--storage.tsdb.retention.time=30d"
       - "--storage.tsdb.retention.size=10GB"
     networks:
-      - monitoring
-      - traefik-metrics   # métriques de Traefik (réseau créé par kiwinet-services)
+      monitoring:
+      traefik-metrics:
+        # Adresse fixe : Traefik demande .10 sur ce réseau ; sans réservation,
+        # Prometheus (démarré en parallèle) peut la prendre et Traefik ne démarre pas.
+        ipv4_address: 172.31.255.11
     deploy:
       resources:
         limits:
