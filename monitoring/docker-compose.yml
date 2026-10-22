@@ -5,7 +5,8 @@
 #           Alloy (journaux) ; Grafana (tableaux de bord et alertes)
 # Accès   : https://grafana.kiwinet.me (via Traefik : limitation de débit,
 #           authentification de base, puis connexion Grafana)
-# Secrets : fichier .env local, ignoré par Git (voir env.example)
+# Secrets : fichier .env local, ignoré par Git (voir env.example) ; mot de passe de la
+#           base de Grafana en secret Docker (fichier hors dépôt, voir plus bas)
 # Détail des choix : README.md et Décisions (Stack) dans le second brain Notion
 ###############################################################################
 
@@ -213,7 +214,11 @@ services:
       GF_DATABASE_HOST: postgres:5432
       GF_DATABASE_NAME: grafana
       GF_DATABASE_USER: grafana
-      GF_DATABASE_PASSWORD: ${GRAFANA_DB_PASSWORD:?GRAFANA_DB_PASSWORD manquant, voir env.example}
+      # Mot de passe du rôle PostgreSQL de Grafana : lu depuis un secret Docker (fichier
+      # hors dépôt, lisible seulement par l'UID 472 de Grafana), jamais en variable
+      # d'environnement (visible par docker inspect, donc par tout client du proxy de
+      # socket). Le démarrage échoue si le fichier de secret manque.
+      GF_DATABASE_PASSWORD__FILE: /run/secrets/grafana_db_password
       GF_DATABASE_SSL_MODE: disable
       # Adresse publique (liens des alertes) et cookies réservés à HTTPS
       GF_SERVER_ROOT_URL: https://grafana.kiwinet.me
@@ -236,6 +241,8 @@ services:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    secrets:
+      - grafana_db_password
     networks:
       - proxy       # exposition publique via Traefik
       - monitoring  # sources de données Prometheus et Loki
@@ -294,3 +301,11 @@ volumes:
   loki_data:
   alloy_data:
   grafana_data:
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECRETS (fichiers créés à la main sur le serveur, hors dépôt)
+# ─────────────────────────────────────────────────────────────────────────────
+secrets:
+  grafana_db_password:
+    # Propriétaire UID 472 (utilisateur de Grafana), mode 400
+    file: /etc/kiwinet/secrets/grafana_db_password
